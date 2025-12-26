@@ -15,10 +15,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     let settings = Settings {
-        db_url: "file:///tmp/weifinder.db".to_string(),
+        db_url: "file://data/weifinder.db".to_string(),
         fetcher_max_concurrency: NonZeroUsize::new(100).unwrap(),
         fetcher_max_rps: NonZeroU32::new(100).unwrap(),
         rpc_url: "https://mainnet.infura.io/v3/".to_string(),
+        data_path: "data/data.ducklake".to_string(),
     };
 
     let indexer = ChainIndexer::run(&settings).await?;

@@ -32,7 +32,7 @@ impl Default for BlockFetcherParams {
 }
 
 pub struct BlockFetcher {
-    rx: Receiver<Result<Option<Block>, RpcError<TransportErrorKind>>>,
+    rx: Receiver<(u64, Result<Option<Block>, RpcError<TransportErrorKind>>)>,
 }
 
 impl BlockFetcher {
@@ -47,12 +47,17 @@ impl BlockFetcher {
         let mut current_head = provider.current_head().clone();
 
         tokio::spawn(async move {
-            let mut block_number = params.start_block;
+            let mut fetching_block_number = params.start_block;
 
             loop {
-                let current_head_block_number = { current_head.borrow_and_update().number };
+                let (current_head_number, is_new_head) = {
+                    let head = current_head.borrow_and_update();
+                    (head.number, head.has_changed())
+                };
 
-                if block_number >= current_head_block_number {
+                if fetching_block_number > current_head_number {
+                    fetching_block_number = current_head_number;
+                } else if fetching_block_number == current_head_number && !is_new_head {
                     if let Err(_) = current_head.changed().await {
                         break;
                     }
@@ -71,22 +76,24 @@ impl BlockFetcher {
 
                 tokio::spawn(async move {
                     let block = provider
-                        .get_block_by_number(BlockNumberOrTag::Number(block_number))
+                        .get_block_by_number(BlockNumberOrTag::Number(fetching_block_number))
                         .await;
 
-                    tx.send_async(block).await.unwrap();
+                    tx.send_async((fetching_block_number, block)).await.unwrap();
 
                     drop(permit)
                 });
 
-                block_number += 1;
+                fetching_block_number += 1;
             }
         });
 
         Ok(Self { rx })
     }
 
-    pub async fn receiver(&self) -> &Receiver<Result<Option<Block>, RpcError<TransportErrorKind>>> {
+    pub fn receiver(
+        &self,
+    ) -> &Receiver<(u64, Result<Option<Block>, RpcError<TransportErrorKind>>)> {
         &self.rx
     }
 }

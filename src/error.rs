@@ -2,10 +2,20 @@ use alloy::transports::{RpcError, TransportErrorKind};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("RPC error: {0}")]
+    #[error("RPC error")]
     RpcError(#[from] RpcError<TransportErrorKind>),
     #[error("Database connection error")]
     DbConnectionError(#[from] diesel::ConnectionError),
     #[error("Database query error")]
     DbQueryError(#[from] diesel::result::Error),
+    #[error("Missing block {0}")]
+    MissingBlock(u64),
+    #[error("Block fetch error #{block_number}")]
+    BlockFetchError {
+        block_number: u64,
+        #[source]
+        source: RpcError<TransportErrorKind>,
+    },
+    #[error("Data store error")]
+    DataStoreError(#[from] duckdb::Error),
 }
