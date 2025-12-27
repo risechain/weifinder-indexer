@@ -3,10 +3,10 @@ mod head_watcher;
 mod provider;
 
 pub use block_fetcher::*;
-use duckdb::params;
+use duckdb::{OptionalExt, params};
 pub use head_watcher::*;
 pub use provider::*;
-use tracing::debug;
+use tracing::info;
 
 use std::{collections::VecDeque, num::NonZeroU32};
 
@@ -16,27 +16,22 @@ use alloy::{
     rpc::{client::ClientBuilder, types::Block},
     transports::layers::RetryBackoffLayer,
 };
-use diesel::{
-    Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper,
-    SqliteConnection, connection::SimpleConnection, upsert::excluded,
-};
 
-use crate::{
-    models::{Checkpoint, NewCheckpoint},
-    settings::Settings,
-};
+use crate::settings::Settings;
+
+struct Checkpoint {
+    block_number: u64,
+    block_hash: String,
+}
 
 pub struct ChainIndexer {
     chain_id: u64,
-    db_conn: SqliteConnection,
     block_fetcher: BlockFetcher,
     data_conn: duckdb::Connection,
 }
 
 impl ChainIndexer {
     pub async fn run(settings: &Settings) -> Result<Self, crate::Error> {
-        use crate::schema::checkpoints::dsl::*;
-
         let client = ClientBuilder::default()
             .layer(RetryBackoffLayer::new(
                 10,
@@ -58,15 +53,6 @@ impl ChainIndexer {
 
         let chain_id_ = provider.get_chain_id().await?;
 
-        let mut db_conn = SqliteConnection::establish(&settings.db_url)?;
-        db_conn.batch_execute("PRAGMA journal_mode = WAL;")?;
-
-        let last_checkpoint = checkpoints
-            .select(Checkpoint::as_select())
-            .filter(chain_id.eq(chain_id_ as i32))
-            .first(&mut db_conn)
-            .optional()?;
-
         let data_conn = duckdb::Connection::open_in_memory()?;
 
         #[cfg(debug_assertions)]
@@ -80,11 +66,13 @@ impl ChainIndexer {
             )
             .unwrap();
 
+        let blocks_table = format!("blocks_{}", chain_id_);
+
         data_conn
             .execute(
                 &format!(
                     r#"
-                CREATE TABLE IF NOT EXISTS {} (
+                CREATE TABLE IF NOT EXISTS {blocks_table} (
                 number UINT64 NOT NULL,
                 hash VARCHAR NOT NULL,
                 timestamp UINT64 NOT NULL,
@@ -93,11 +81,26 @@ impl ChainIndexer {
                 gas_limit UINT64 NOT NULL,
                 );
                 "#,
-                    format!("blocks_{}", chain_id_)
                 ),
                 [],
             )
             .unwrap();
+
+        let last_checkpoint = data_conn
+            .query_row(
+                format!("SELECT number, hash FROM {blocks_table} ORDER BY number DESC LIMIT 1")
+                    .as_str(),
+                [],
+                |row| {
+                    row.get("number").and_then(|number: u64| {
+                        row.get("hash").map(|hash: String| Checkpoint {
+                            block_number: number,
+                            block_hash: hash,
+                        })
+                    })
+                },
+            )
+            .optional()?;
 
         #[cfg(not(debug_assertions))]
         todo!("Implement data connection setup for release builds");
@@ -110,14 +113,14 @@ impl ChainIndexer {
                 start_block: last_checkpoint
                     .as_ref()
                     .map(|c| c.block_number)
-                    .unwrap_or(0) as u64,
+                    .unwrap_or(0) as u64
+                    + 1,
             },
         )
         .await?;
 
         let mut res = Self {
             chain_id: chain_id_,
-            db_conn,
             block_fetcher,
             data_conn,
         };
@@ -139,7 +142,7 @@ impl ChainIndexer {
         let mut blocks_in_appender = 0;
 
         while let Ok((block_number, block_res)) = rx.recv_async().await {
-            debug!("processing block #{block_number}: {:?}", block_res);
+            info!("processing block #{block_number}");
 
             let incoming_block = block_res
                 .map_err(|err| crate::Error::BlockFetchError {
@@ -201,7 +204,7 @@ impl ChainIndexer {
                     }
 
                     last_checkpoint = Some(Checkpoint {
-                        block_number: block.number() as i32,
+                        block_number: block.number(),
                         block_hash: block.hash().encode_hex_with_prefix(),
                     });
 
@@ -217,27 +220,10 @@ impl ChainIndexer {
                     blocks_in_appender += 1;
                     if blocks_in_appender >= 1000 {
                         block_appender.flush()?;
-
-                        use crate::schema::checkpoints::dsl::*;
-                        let new_checkpoint = NewCheckpoint {
-                            chain_id: self.chain_id as i32,
-                            block_hash: block.hash().encode_hex_with_prefix(),
-                            block_number: block.number() as i32,
-                        };
-                        diesel::insert_into(checkpoints)
-                            .values(&new_checkpoint)
-                            .on_conflict(chain_id)
-                            .do_update()
-                            .set((
-                                block_hash.eq(excluded(block_hash)),
-                                block_number.eq(excluded(block_number)),
-                            ))
-                            .execute(&mut self.db_conn)?;
-
                         blocks_in_appender = 0;
                     }
 
-                    debug!("appended block #{}: {:?}", block.number(), block);
+                    info!("appended block #{}", block.number());
                 }
             }
         }

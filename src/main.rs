@@ -19,7 +19,6 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let settings = Settings {
-        db_url: "data/indexer.db".to_string(),
         fetcher_max_concurrency: NonZeroUsize::new(100).unwrap(),
         fetcher_max_rps: NonZeroU32::new(100).unwrap(),
         rpc_url: "wss://testnet.riselabs.xyz/ws".to_string(),

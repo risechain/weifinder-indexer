@@ -12,7 +12,6 @@ use alloy::{
 use flume::Receiver;
 use governor::{Quota, RateLimiter};
 use tokio::sync::Semaphore;
-use tracing::debug;
 
 use crate::indexer::provider::IndexerProvider;
 
@@ -79,8 +78,6 @@ impl BlockFetcher {
                     let block = provider
                         .get_block_by_number(BlockNumberOrTag::Number(fetching_block_number))
                         .await;
-
-                    debug!("fetched block #{}: {:?}", fetching_block_number, block);
 
                     tx.send_async((fetching_block_number, block)).await.unwrap();
 

@@ -7,10 +7,11 @@ edition = "2024"
 alloy = { version = "1.2.1", features = ["provider-ws"] }
 anyhow = "1.0.100"
 config = "0.15.19"
-diesel = { version = "2.3.5", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
 duckdb = { version = "1.4.3", features = ["bundled"] }
 flume = "0.12.0"
 governor = "0.10.4"
+metrics = "0.24.3"
+ratatui = "0.30.0"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full"] }
 tracing = "0.1.44"

@@ -1,8 +1,7 @@
 mod error;
 pub mod indexer;
-mod models;
-mod schema;
 mod settings;
+mod tui;
 
 pub use error::*;
 pub use settings::*;
