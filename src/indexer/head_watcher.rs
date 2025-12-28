@@ -21,7 +21,7 @@ impl ChainHeadWatcher {
 
         let mut sub = provider.subscribe_blocks().await?;
 
-        let (tx, rx) = watch::channel(current_head.clone());
+        let (tx, rx) = watch::channel(current_head);
 
         tokio::spawn(async move {
             while let Ok(header) = sub.recv().await {

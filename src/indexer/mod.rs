@@ -6,7 +6,6 @@ pub use block_fetcher::*;
 use duckdb::{OptionalExt, params};
 pub use head_watcher::*;
 pub use provider::*;
-use tracing::info;
 
 use std::{collections::VecDeque, num::NonZeroU32};
 
@@ -142,8 +141,6 @@ impl ChainIndexer {
         let mut blocks_in_appender = 0;
 
         while let Ok((block_number, block_res)) = rx.recv_async().await {
-            info!("processing block #{block_number}");
-
             let incoming_block = block_res
                 .map_err(|err| crate::Error::BlockFetchError {
                     block_number,
@@ -222,8 +219,6 @@ impl ChainIndexer {
                         block_appender.flush()?;
                         blocks_in_appender = 0;
                     }
-
-                    info!("appended block #{}", block.number());
                 }
             }
         }

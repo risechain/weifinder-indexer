@@ -42,26 +42,35 @@ impl BlockFetcher {
     ) -> Result<Self, crate::error::Error> {
         let (tx, rx) = flume::bounded(1000);
 
-        let semaphore = Arc::new(Semaphore::new(params.max_concurrency.get() as usize));
-        let rate_limiter = RateLimiter::direct(Quota::per_second(params.max_rps));
-        let mut current_head = provider.current_head().clone();
-
         tokio::spawn(async move {
+            let semaphore = Arc::new(Semaphore::new(params.max_concurrency.get() as usize));
+            let rate_limiter = RateLimiter::direct(Quota::per_second(params.max_rps));
+
+            let mut current_head = provider.current_head().clone();
             let mut fetching_block_number = params.start_block;
 
             loop {
                 let (current_head_number, is_new_head) = {
-                    let head = current_head.borrow_and_update();
+                    let head = current_head.borrow();
                     (head.number, head.has_changed())
                 };
 
-                if fetching_block_number > current_head_number {
-                    fetching_block_number = current_head_number;
-                } else if fetching_block_number == current_head_number && !is_new_head {
+                let should_wait_next_block =
+                    fetching_block_number >= current_head_number && !is_new_head;
+
+                if should_wait_next_block {
                     if let Err(_) = current_head.changed().await {
                         break;
                     }
+                    current_head.mark_changed();
                     continue;
+                } else if fetching_block_number >= current_head_number {
+                    current_head.mark_unchanged();
+                }
+
+                if fetching_block_number > current_head_number {
+                    // this means there is a reorg
+                    fetching_block_number = current_head_number;
                 }
 
                 let permit = semaphore
