@@ -1,6 +1,7 @@
 use std::{
     num::{NonZeroU32, NonZeroUsize},
     sync::Arc,
+    time::Instant,
 };
 
 use alloy::{
@@ -11,7 +12,7 @@ use alloy::{
 };
 use flume::Receiver;
 use governor::{Quota, RateLimiter};
-use metrics::counter;
+use metrics::{counter, histogram};
 use tokio::sync::Semaphore;
 
 use crate::indexer::provider::IndexerProvider;
@@ -50,6 +51,7 @@ impl BlockFetcher {
             let mut current_head = provider.current_head().clone();
             let mut fetching_block_number = params.start_block.unwrap_or(0);
             let last_fetched_block_counter = counter!("indexer_last_fetched_block");
+            let block_fetch_duration_histogram = histogram!("indexer_block_fetch_duration_seconds");
 
             loop {
                 let (current_head_number, is_new_head) = {
@@ -84,11 +86,14 @@ impl BlockFetcher {
 
                 let provider = provider.clone();
                 let tx = tx.clone();
+                let block_fetch_duration_histogram = block_fetch_duration_histogram.clone();
 
                 tokio::spawn(async move {
+                    let fetch_start = Instant::now();
                     let block = provider
                         .get_block_by_number(BlockNumberOrTag::Number(fetching_block_number))
                         .await;
+                    block_fetch_duration_histogram.record(fetch_start.elapsed().as_secs_f64());
 
                     tx.send_async((fetching_block_number, block)).await.unwrap();
 

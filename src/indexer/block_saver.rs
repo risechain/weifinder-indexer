@@ -1,9 +1,9 @@
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc, time::Instant};
 
 use alloy::{hex::ToHexExt, rpc::types::Block};
 use duckdb::{OptionalExt, params};
 use flume::{SendError, Sender};
-use metrics::counter;
+use metrics::{counter, histogram};
 use tokio::sync::RwLock;
 use tracing::error;
 
@@ -70,6 +70,15 @@ impl BlockSaver {
         #[cfg(not(debug_assertions))]
         todo!("Implement data connection setup for release builds");
 
+        let last_saved_block_counter = counter!("indexer_last_saved_block");
+
+        last_saved_block_counter.absolute(
+            last_checkpoint
+                .as_ref()
+                .map(|c| c.block_number)
+                .unwrap_or(0),
+        );
+
         let (tx, rx) = flume::bounded::<Block>(batch_save_size.get() * 10);
 
         tokio::task::spawn_blocking(move || {
@@ -83,10 +92,12 @@ impl BlockSaver {
 
             let batch_size = batch_save_size.get();
             let mut blocks_in_appender = 0;
-            let last_saved_block_counter = counter!("indexer_last_saved_block");
+            let append_duration_histogram = histogram!("indexer_duckdb_append_duration_seconds");
+            let flush_duration_histogram = histogram!("indexer_duckdb_flush_duration_seconds");
 
             while let Ok(block) = rx.recv() {
                 // todo: use insert with data inlining instead when at the tip of the chain
+                let append_start = Instant::now();
                 if let Err(err) = block_appender.append_row(params![
                     block.number(),
                     block.hash().encode_hex_with_prefix(),
@@ -98,14 +109,17 @@ impl BlockSaver {
                     error!("Failed to append block to appender: {}", err);
                     break;
                 }
+                append_duration_histogram.record(append_start.elapsed().as_secs_f64());
 
                 blocks_in_appender += 1;
 
                 if blocks_in_appender >= batch_size {
+                    let flush_start = Instant::now();
                     if let Err(err) = block_appender.flush() {
                         error!("Failed to flush block appender: {}", err);
                         break;
                     }
+                    flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
                     last_saved_block_counter.absolute(block.number());
                     blocks_in_appender = 0;
                 }

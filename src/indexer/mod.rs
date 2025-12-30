@@ -11,12 +11,12 @@ pub use provider::*;
 use std::{collections::VecDeque, num::NonZeroU32};
 
 use alloy::{
-    eips::BlockNumberOrTag,
     hex::ToHexExt,
-    providers::{Provider, ProviderBuilder, WsConnect},
+    providers::{ProviderBuilder, WsConnect},
     rpc::{client::ClientBuilder, types::Block},
     transports::layers::RetryBackoffLayer,
 };
+use metrics::counter;
 
 use crate::settings::Settings;
 
@@ -83,6 +83,8 @@ impl ChainIndexer {
         let rx = self.block_fetcher.receiver();
         let mut block_queue: VecDeque<Block> = VecDeque::new();
 
+        let reorgs_detected_counter = counter!("indexer_reorgs_detected_total");
+
         while let Ok((block_number, block_res)) = rx.recv_async().await {
             let incoming_block = block_res
                 .map_err(|err| crate::Error::BlockFetchError {
@@ -109,6 +111,7 @@ impl ChainIndexer {
                 // 1. flush appender
                 // 2. delete reorged blocks from data store
                 // 3. continue
+                reorgs_detected_counter.increment(1);
                 todo!("Handle reorg in data store level")
             } else {
                 let idx = block_queue.partition_point(|b| b.number() < incoming_block.number());

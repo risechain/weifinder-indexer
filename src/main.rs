@@ -2,22 +2,23 @@ use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 
 use tracing::info;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use weifinder_indexer::Settings;
 use weifinder_indexer::indexer::ChainIndexer;
 use weifinder_indexer::tui::TuiExporter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // let settings_path: PathBuf = env::args()
-    //     .nth(1)
-    //     .or(env::var("INDEXER_SETTINGS_PATH").ok())
-    //     .map(|path_str| path_str.into())
-    //     .or(Some(PathBuf::from("settings.toml")))
-    //     .unwrap();
-    // println!("Settings path: {}", settings_path.display());
-    // todo: load settings from file or env
+    tui_logger::init_logger(log::LevelFilter::Trace)?;
 
-    tracing_subscriber::fmt::init();
+    // Set up tracing with tui-logger layer
+    tracing_subscriber::registry()
+        .with(tui_logger::TuiTracingSubscriberLayer)
+        .with(EnvFilter::from_default_env())
+        .init();
+
     metrics::set_global_recorder(TuiExporter::new())?;
 
     let settings = Settings {

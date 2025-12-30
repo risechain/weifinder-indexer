@@ -115,6 +115,12 @@ impl Recorder for TuiExporter {
                     .unwrap()
                     .set_current_head_number(inner_counter.clone());
             }
+            "indexer_reorgs_detected_total" => {
+                self.stats
+                    .lock()
+                    .unwrap()
+                    .set_reorgs_detected_total(inner_counter.clone());
+            }
             _ => {}
         }
 
@@ -136,6 +142,17 @@ impl Recorder for TuiExporter {
         let inner_histogram = self
             .registry
             .get_or_create_histogram(key, |histogram| Arc::new(histogram.clone()));
+
+        match key.name() {
+            "indexer_block_fetch_duration_seconds" => {
+                self.stats
+                    .lock()
+                    .unwrap()
+                    .set_block_fetch_duration(inner_histogram.summary.clone());
+            }
+            _ => {}
+        }
+
         metrics::Histogram::from_arc(inner_histogram)
     }
 }
