@@ -52,7 +52,13 @@ impl ChainIndexer {
         )
         .await?;
 
-        let block_saver = BlockSaver::run(provider.clone(), settings.batch_save_size)?;
+        let block_saver = BlockSaver::run(BlockSaverParams {
+            batch_save_size: settings.batch_save_size,
+            catalog_db_url: &settings.catalog_db_url,
+            s3_endpoint: &settings.s3_endpoint,
+            s3_access_key_id: &settings.s3_access_key_id,
+            s3_secret_access_key: &settings.s3_secret_access_key,
+        })?;
 
         let last_checkpoint = block_saver.last_saved_checkpoint().await;
 

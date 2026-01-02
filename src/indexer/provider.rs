@@ -10,7 +10,7 @@ use crate::indexer::ChainHeadWatcher;
 pub struct IndexerProvider {
     provider: RootProvider,
     chain_head_watcher: ChainHeadWatcher,
-    chain_id: u64
+    chain_id: u64,
 }
 
 impl IndexerProvider {

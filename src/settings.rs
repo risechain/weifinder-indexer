@@ -8,4 +8,8 @@ pub struct Settings {
     pub fetcher_max_concurrency: NonZeroUsize,
     pub fetcher_max_rps: NonZeroU32,
     pub batch_save_size: NonZeroUsize,
+    pub catalog_db_url: String,
+    pub s3_endpoint: String,
+    pub s3_access_key_id: String,
+    pub s3_secret_access_key: String,
 }

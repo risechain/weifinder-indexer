@@ -7,54 +7,69 @@ use metrics::{counter, histogram};
 use tokio::sync::RwLock;
 use tracing::error;
 
-use crate::indexer::{Checkpoint, IndexerProvider};
+use crate::indexer::Checkpoint;
 
 pub struct BlockSaver {
     tx: Sender<Block>,
     last_checkpoint: Arc<RwLock<Option<Checkpoint>>>,
 }
 
+pub struct BlockSaverParams<'a> {
+    pub batch_save_size: NonZeroUsize,
+    pub catalog_db_url: &'a str,
+    pub s3_endpoint: &'a str,
+    pub s3_access_key_id: &'a str,
+    pub s3_secret_access_key: &'a str,
+}
+
 impl BlockSaver {
     pub fn run(
-        provider: IndexerProvider,
-        batch_save_size: NonZeroUsize,
+        BlockSaverParams {
+            batch_save_size,
+            catalog_db_url,
+            s3_endpoint,
+            s3_access_key_id,
+            s3_secret_access_key,
+        }: BlockSaverParams,
     ) -> Result<Self, crate::Error> {
         let data_conn = duckdb::Connection::open_in_memory()?;
-        let blocks_table = format!("blocks_{}", provider.chain_id());
+        let is_remote = !s3_endpoint.starts_with("localhost");
 
-        #[cfg(debug_assertions)]
         data_conn
-            .execute_batch(
+            .execute_batch(&format!(
                 r#"
-                        INSTALL ducklake;
-                        ATTACH 'ducklake:data/data.ducklake' AS data;
-                        USE data;
-                        "#,
-            )
-            .unwrap();
+                    CREATE OR REPLACE SECRET secret (
+                        TYPE s3,
+                        PROVIDER config,
+                        URL_STYLE path,
+                        ENDPOINT '{s3_endpoint}',
+                        USE_SSL {is_remote},
+                        KEY_ID '{s3_access_key_id}',
+                        SECRET '{s3_secret_access_key}'
 
-        data_conn
-            .execute(
-                &format!(
-                    r#"
-                        CREATE TABLE IF NOT EXISTS {blocks_table} (
+                    );
+
+                    ATTACH 'ducklake:postgres:{catalog_db_url}' AS data (
+                        DATA_PATH 's3://indexer/data/',
+                        DATA_INLINING_ROW_LIMIT 10
+                    );
+                    USE data;
+
+                    CREATE TABLE IF NOT EXISTS blocks (
                         number UINT64 NOT NULL,
                         hash VARCHAR NOT NULL,
                         timestamp UINT64 NOT NULL,
                         parent_hash VARCHAR NOT NULL,
                         gas_used UINT64 NOT NULL,
                         gas_limit UINT64 NOT NULL,
-                        );
-                        "#,
-                ),
-                [],
-            )
+                    );
+                "#,
+            ))
             .unwrap();
 
         let last_checkpoint = data_conn
             .query_row(
-                format!("SELECT number, hash FROM {blocks_table} ORDER BY number DESC LIMIT 1")
-                    .as_str(),
+                "SELECT number, hash FROM blocks ORDER BY number DESC LIMIT 1",
                 [],
                 |row| {
                     row.get("number").and_then(|number: u64| {
@@ -66,9 +81,6 @@ impl BlockSaver {
                 },
             )
             .optional()?;
-
-        #[cfg(not(debug_assertions))]
-        todo!("Implement data connection setup for release builds");
 
         let last_saved_block_counter = counter!("indexer_last_saved_block");
 
@@ -82,7 +94,7 @@ impl BlockSaver {
         let (tx, rx) = flume::bounded::<Block>(batch_save_size.get() * 10);
 
         tokio::task::spawn_blocking(move || {
-            let mut block_appender = match data_conn.appender(&blocks_table) {
+            let mut block_appender = match data_conn.appender("blocks") {
                 Ok(appender) => appender,
                 Err(err) => {
                     error!("Failed to create block appender: {}", err);
@@ -96,7 +108,6 @@ impl BlockSaver {
             let flush_duration_histogram = histogram!("indexer_duckdb_flush_duration_seconds");
 
             while let Ok(block) = rx.recv() {
-                // todo: use insert with data inlining instead when at the tip of the chain
                 let append_start = Instant::now();
                 if let Err(err) = block_appender.append_row(params![
                     block.number(),

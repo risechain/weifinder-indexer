@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -40,7 +41,6 @@ async fn main() -> anyhow::Result<()> {
         .add_source(config::Environment::with_prefix("INDEXER"))
         .set_default("fetcher_max_concurrency", 100)?
         .set_default("fetcher_max_rps", 100)?
-        .set_default("rpc_ws", "wss://testnet.riselabs.xyz/ws")?
         .set_default("batch_save_size", 1000)?
         .build()?
         .try_deserialize()?;

@@ -7,8 +7,8 @@ use std::{
     time::Duration,
 };
 
-pub use exporter::*;
 use duckdb::arrow::array::ArrowNativeTypeOp;
+pub use exporter::*;
 use ratatui::{
     Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -18,7 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, Paragraph, Widget},
 };
 pub use stats::*;
-use throbber_widgets_tui::{Throbber, ThrobberState, BRAILLE_SIX};
+use throbber_widgets_tui::{BRAILLE_SIX, Throbber, ThrobberState};
 use tokio::task::JoinHandle;
 use tui_logger::TuiLoggerWidget;
 

@@ -2,3 +2,4 @@ fetcher_max_concurrency = 100
 fetcher_max_rps = 100
 rpc_ws = "wss://indexing.testnet.riselabs.xyz/ws"
 batch_save_size = 1000
+s3_endpoint = 'localhost:9000'
