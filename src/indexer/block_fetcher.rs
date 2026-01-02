@@ -33,8 +33,10 @@ impl Default for BlockFetcherParams {
     }
 }
 
+pub type FallibleMaybeBlock = Result<Option<Block>, RpcError<TransportErrorKind>>;
+
 pub struct BlockFetcher {
-    rx: Receiver<(u64, Result<Option<Block>, RpcError<TransportErrorKind>>)>,
+    rx: Receiver<(u64, FallibleMaybeBlock)>,
 }
 
 impl BlockFetcher {
@@ -45,7 +47,7 @@ impl BlockFetcher {
         let (tx, rx) = flume::bounded(1000);
 
         tokio::spawn(async move {
-            let semaphore = Arc::new(Semaphore::new(params.max_concurrency.get() as usize));
+            let semaphore = Arc::new(Semaphore::new(params.max_concurrency.get()));
             let rate_limiter = RateLimiter::direct(Quota::per_second(params.max_rps));
 
             let mut current_head = provider.current_head().clone();
@@ -63,7 +65,7 @@ impl BlockFetcher {
                     fetching_block_number >= current_head_number && !is_new_head;
 
                 if should_wait_next_block {
-                    if let Err(_) = current_head.changed().await {
+                    if current_head.changed().await.is_err() {
                         break;
                     }
                     current_head.mark_changed();
@@ -109,9 +111,7 @@ impl BlockFetcher {
         Ok(Self { rx })
     }
 
-    pub fn receiver(
-        &self,
-    ) -> &Receiver<(u64, Result<Option<Block>, RpcError<TransportErrorKind>>)> {
+    pub fn receiver(&self) -> &Receiver<(u64, FallibleMaybeBlock)> {
         &self.rx
     }
 }

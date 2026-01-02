@@ -54,6 +54,12 @@ pub struct TuiExporter {
     stats: Arc<Mutex<Stats>>,
 }
 
+impl Default for TuiExporter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TuiExporter {
     pub fn new() -> Self {
         let stats = Arc::new(Mutex::new(Stats::default()));
@@ -143,14 +149,11 @@ impl Recorder for TuiExporter {
             .registry
             .get_or_create_histogram(key, |histogram| Arc::new(histogram.clone()));
 
-        match key.name() {
-            "indexer_block_fetch_duration_seconds" => {
-                self.stats
-                    .lock()
-                    .unwrap()
-                    .set_block_fetch_duration(inner_histogram.summary.clone());
-            }
-            _ => {}
+        if key.name() == "indexer_block_fetch_duration_seconds" {
+            self.stats
+                .lock()
+                .unwrap()
+                .set_block_fetch_duration(inner_histogram.summary.clone());
         }
 
         metrics::Histogram::from_arc(inner_histogram)

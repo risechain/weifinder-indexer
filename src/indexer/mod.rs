@@ -129,7 +129,7 @@ impl ChainIndexer {
 
                     let is_next_block = match &last_checkpoint {
                         Some(last_checkpoint) => {
-                            next_block_number == last_checkpoint.block_number as u64 + 1
+                            next_block_number == last_checkpoint.block_number + 1
                         }
                         None => next_block_number == 0,
                     };
@@ -140,7 +140,7 @@ impl ChainIndexer {
 
                     let is_reorged_block =
                         last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
-                            last_checkpoint.block_number as u64 == next_block_number
+                            last_checkpoint.block_number == next_block_number
                                 || next_block
                                     .header
                                     .parent_hash
@@ -154,7 +154,7 @@ impl ChainIndexer {
                         continue;
                     }
 
-                    if let Err(_) = self.block_saver.save_block(block).await {
+                    if self.block_saver.save_block(block).await.is_err() {
                         break;
                     }
 

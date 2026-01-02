@@ -41,10 +41,10 @@ impl Tui {
 
         tokio::task::spawn_blocking(move || {
             while !tui.exit {
-                if let Err(_) = terminal.draw(|frame| tui.draw(frame)) {
+                if terminal.draw(|frame| tui.draw(frame)).is_err() {
                     break;
                 }
-                if let Err(_) = tui.handle_events() {
+                if tui.handle_events().is_err() {
                     break;
                 }
                 tui.update();
@@ -72,9 +72,8 @@ impl Tui {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Char('q') => self.exit = true,
-            _ => {}
+        if let KeyCode::Char('q') = key_event.code {
+            self.exit = true
         }
     }
 
