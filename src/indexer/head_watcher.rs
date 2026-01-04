@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use alloy::{
     eips::BlockId,
     providers::{Provider, RootProvider},
@@ -6,11 +8,11 @@ use alloy::{
 use metrics::counter;
 use op_alloy_network::Optimism;
 use tokio::sync::watch;
-use tracing::error;
 
 #[derive(Clone)]
 pub struct ChainHeadWatcher {
     pub current_head: watch::Receiver<Header>,
+    pub task_handle: Arc<tokio::task::JoinHandle<()>>,
 }
 
 impl ChainHeadWatcher {
@@ -27,15 +29,16 @@ impl ChainHeadWatcher {
 
         let (tx, rx) = watch::channel(current_head);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             while let Ok(header) = sub.recv().await {
                 current_head_counter.absolute(header.number);
                 tx.send(header).ok();
             }
-
-            error!("Chain head watcher exited");
         });
 
-        Ok(Self { current_head: rx })
+        Ok(Self {
+            current_head: rx,
+            task_handle: Arc::new(handle),
+        })
     }
 }

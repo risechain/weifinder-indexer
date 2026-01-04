@@ -1,17 +1,17 @@
+mod error;
 mod exporter;
 mod stats;
 
 use std::{
-    io,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use duckdb::arrow::array::ArrowNativeTypeOp;
+pub use error::*;
 pub use exporter::*;
 use ratatui::{
-    Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -23,61 +23,51 @@ use tokio::task::JoinHandle;
 use tui_logger::TuiLoggerWidget;
 
 pub struct Tui {
-    stats: Arc<Mutex<Stats>>,
-    exit: bool,
+    pub task_handle: JoinHandle<Result<(), crate::tui::Error>>,
+    pub stats: Arc<Mutex<Stats>>,
+}
+
+impl Tui {
+    pub fn new() -> Self {
+        let mut terminal = ratatui::init();
+        let mut tui_widget = TuiWidget::default();
+        let stats = tui_widget.stats.clone();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            loop {
+                terminal.draw(|frame| frame.render_widget(&tui_widget, frame.area()))?;
+
+                if event::poll(Duration::from_millis(200))? {
+                    if let Event::Key(key_event) = event::read()?
+                        && key_event.kind == KeyEventKind::Press
+                    {
+                        if let KeyCode::Char('q') = key_event.code {
+                            break;
+                        }
+                    }
+                }
+
+                tui_widget.update();
+            }
+            Ok(ratatui::restore())
+        });
+
+        Self {
+            task_handle: handle,
+            stats,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct TuiWidget {
+    pub stats: Arc<Mutex<Stats>>,
     fetching_throbber_state: ThrobberState,
     indexing_throbber_state: ThrobberState,
 }
 
-impl Tui {
-    pub fn spawn(stats: Arc<Mutex<Stats>>) -> JoinHandle<()> {
-        let mut terminal = ratatui::init();
-        let mut tui = Self {
-            stats,
-            exit: false,
-            fetching_throbber_state: ThrobberState::default(),
-            indexing_throbber_state: ThrobberState::default(),
-        };
-
-        tokio::task::spawn_blocking(move || {
-            while !tui.exit {
-                if terminal.draw(|frame| tui.draw(frame)).is_err() {
-                    break;
-                }
-                if tui.handle_events().is_err() {
-                    break;
-                }
-                tui.update();
-            }
-            ratatui::restore();
-        })
-    }
-
-    fn draw(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
-    }
-
-    fn handle_events(&mut self) -> io::Result<()> {
-        if !event::poll(Duration::from_millis(200))? {
-            return Ok(());
-        }
-
-        if let Event::Key(key_event) = event::read()?
-            && key_event.kind == KeyEventKind::Press
-        {
-            self.handle_key_event(key_event);
-        }
-
-        Ok(())
-    }
-
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if let KeyCode::Char('q') = key_event.code {
-            self.exit = true
-        }
-    }
-
-    fn update(&mut self) {
+impl TuiWidget {
+    pub fn update(&mut self) {
         self.fetching_throbber_state.calc_next();
         self.indexing_throbber_state.calc_next();
         // Move log events from hot buffer to widget buffer
@@ -85,7 +75,7 @@ impl Tui {
     }
 }
 
-impl Widget for &Tui {
+impl Widget for &TuiWidget {
     fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer)
     where
         Self: Sized,
@@ -340,6 +330,13 @@ fn render_footer(
     // Render version on the right
     let right_paragraph = Paragraph::new(version).alignment(Alignment::Right);
     right_paragraph.render(area, buf);
+
+    let shortcuts = Paragraph::new(Line::from(vec![Span::styled(
+        "press q to quit",
+        Style::default().fg(Color::DarkGray),
+    )]))
+    .alignment(Alignment::Center);
+    shortcuts.render(area, buf);
 }
 
 fn render_logs(buf: &mut ratatui::prelude::Buffer, area: Rect) {

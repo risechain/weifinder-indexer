@@ -8,7 +8,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use weifinder_indexer::Settings;
 use weifinder_indexer::indexer::ChainIndexer;
-use weifinder_indexer::tui::TuiExporter;
+use weifinder_indexer::tui::{Tui, TuiExporter};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -23,17 +23,21 @@ struct CliArgs {
 async fn main() -> anyhow::Result<()> {
     let cli_args = CliArgs::parse();
 
-    if cli_args.headless {
+    let tui = if cli_args.headless {
         tracing_subscriber::fmt::init();
         PrometheusBuilder::new().install()?;
+        None
     } else {
         tui_logger::init_logger(log::LevelFilter::Trace)?;
         tracing_subscriber::registry()
             .with(tui_logger::TuiTracingSubscriberLayer)
             .with(EnvFilter::from_default_env())
             .init();
-        metrics::set_global_recorder(TuiExporter::new())?;
-    }
+        let tui = Tui::new();
+        let tui_exporter = TuiExporter::from_stats(tui.stats.clone());
+        metrics::set_global_recorder(tui_exporter)?;
+        Some(tui)
+    };
 
     let settings: Settings = config::Config::builder()
         .add_source(config::File::from(cli_args.config))
@@ -45,7 +49,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting indexer with settings:\n{:?}", settings);
 
-    ChainIndexer::run(&settings).await?;
+    let indexer = ChainIndexer::run(&settings).await?;
 
-    Ok(())
+    if let Some(tui) = tui {
+        tokio::select! {
+            v = tui.task_handle => Ok(v??),
+            v = indexer.wait_for_completion() => Ok(v?)
+        }
+    } else {
+        Ok(indexer.wait_for_completion().await?)
+    }
 }

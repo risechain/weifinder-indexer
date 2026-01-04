@@ -9,7 +9,7 @@ use flume::Receiver;
 use governor::{Quota, RateLimiter};
 use metrics::{counter, histogram};
 use op_alloy_rpc_types::OpTransactionReceipt;
-use tokio::sync::Semaphore;
+use tokio::{sync::Semaphore, task::JoinHandle};
 
 use crate::indexer::{provider::IndexerProvider, types::OpBlock};
 
@@ -19,6 +19,7 @@ pub type FallibleMaybeReceipts =
 
 pub struct BlockFetcher {
     rx: Receiver<(u64, FallibleMaybeBlock, FallibleMaybeReceipts)>,
+    pub task_handle: JoinHandle<Result<(), crate::Error>>,
 }
 
 impl BlockFetcher {
@@ -29,8 +30,8 @@ impl BlockFetcher {
     ) -> Result<Self, crate::error::Error> {
         let (tx, rx) = flume::bounded(1000);
 
-        tokio::spawn(async move {
-            let semaphore = Arc::new(Semaphore::new((max_blocks_per_second.get() as usize) * 2));
+        let handle = tokio::spawn(async move {
+            let semaphore = Arc::new(Semaphore::new(max_blocks_per_second.get() as usize));
             let rate_limiter = RateLimiter::direct(Quota::per_second(max_blocks_per_second));
 
             let mut current_head = provider.current_head().clone();
@@ -48,9 +49,10 @@ impl BlockFetcher {
                     fetching_block_number >= current_head_number && !is_new_head;
 
                 if should_wait_next_block {
-                    if current_head.changed().await.is_err() {
-                        break;
-                    }
+                    current_head
+                        .changed()
+                        .await
+                        .map_err(|err| crate::Error::HeadWatcherClosed(err))?;
                     current_head.mark_changed();
                     continue;
                 } else if fetching_block_number >= current_head_number {
@@ -95,7 +97,10 @@ impl BlockFetcher {
             }
         });
 
-        Ok(Self { rx })
+        Ok(Self {
+            rx,
+            task_handle: handle,
+        })
     }
 
     pub fn receiver(&self) -> &Receiver<(u64, FallibleMaybeBlock, FallibleMaybeReceipts)> {

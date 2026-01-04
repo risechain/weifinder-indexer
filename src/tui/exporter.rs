@@ -6,7 +6,7 @@ use metrics_util::{
     storage::Summary,
 };
 
-use crate::tui::{Stats, Tui};
+use crate::tui::Stats;
 
 struct AtomicStorageWithSummary;
 
@@ -54,17 +54,8 @@ pub struct TuiExporter {
     stats: Arc<Mutex<Stats>>,
 }
 
-impl Default for TuiExporter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TuiExporter {
-    pub fn new() -> Self {
-        let stats = Arc::new(Mutex::new(Stats::default()));
-        Tui::spawn(stats.clone());
-
+    pub fn from_stats(stats: Arc<Mutex<Stats>>) -> Self {
         Self {
             registry: Registry::new(AtomicStorageWithSummary),
             stats,

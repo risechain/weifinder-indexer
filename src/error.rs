@@ -1,4 +1,5 @@
 use alloy::transports::{RpcError, TransportErrorKind};
+use tokio::sync::watch;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -14,4 +15,13 @@ pub enum Error {
     },
     #[error("Data store error")]
     DataStoreError(#[from] duckdb::Error),
+    #[error("Missing transaction {transaction_hash} in block {block_hash}")]
+    MissingTransaction {
+        transaction_hash: String,
+        block_hash: String,
+    },
+    #[error("Head watcher closed")]
+    HeadWatcherClosed(#[source] watch::error::RecvError),
+    #[error("Join error")]
+    JoinError(#[from] tokio::task::JoinError),
 }

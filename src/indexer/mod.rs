@@ -9,6 +9,7 @@ pub use block_saver::*;
 pub use head_watcher::*;
 use op_alloy_rpc_types::OpTransactionReceipt;
 pub use provider::*;
+use tokio::task::JoinHandle;
 
 use std::{collections::VecDeque, num::NonZeroU32};
 
@@ -26,6 +27,7 @@ pub struct Checkpoint {
 pub struct ChainIndexer {
     block_fetcher: BlockFetcher,
     block_saver: BlockSaver,
+    task_handle: JoinHandle<Result<(), crate::Error>>,
 }
 
 impl ChainIndexer {
@@ -44,9 +46,10 @@ impl ChainIndexer {
             s3_endpoint: &settings.s3_endpoint,
             s3_access_key_id: &settings.s3_access_key_id,
             s3_secret_access_key: &settings.s3_secret_access_key,
+            provider: provider.clone(),
         })?;
 
-        let last_checkpoint = block_saver.last_saved_checkpoint().await;
+        let mut last_checkpoint = block_saver.last_saved_checkpoint().await;
 
         let block_fetcher = BlockFetcher::fetch(
             provider,
@@ -55,107 +58,116 @@ impl ChainIndexer {
         )
         .await?;
 
-        let mut res = Self {
-            block_saver,
-            block_fetcher,
-        };
+        let rx = block_fetcher.receiver().clone();
+        let tx = block_saver.tx.clone();
 
-        res.process_blocks(last_checkpoint).await?;
+        let handle = tokio::spawn(async move {
+            let mut block_queue: VecDeque<(OpBlock, Vec<OpTransactionReceipt>)> = VecDeque::new();
 
-        Ok(res)
-    }
+            let reorgs_detected_counter = counter!("indexer_reorgs_detected_total");
 
-    async fn process_blocks(
-        &mut self,
-        mut last_checkpoint: Option<Checkpoint>,
-    ) -> Result<(), crate::Error> {
-        let rx = self.block_fetcher.receiver();
-        let mut block_queue: VecDeque<(OpBlock, Vec<OpTransactionReceipt>)> = VecDeque::new();
+            while let Ok((block_number, block_res, receipts_res)) = rx.recv_async().await {
+                let incoming_block = block_res
+                    .map_err(|err| crate::Error::BlockFetchError {
+                        block_number,
+                        source: err,
+                    })?
+                    .ok_or(crate::Error::MissingBlock(block_number))?;
+                let receipts = receipts_res
+                    .map_err(|err| crate::Error::BlockFetchError {
+                        block_number,
+                        source: err,
+                    })?
+                    .ok_or(crate::Error::MissingBlock(block_number))?;
 
-        let reorgs_detected_counter = counter!("indexer_reorgs_detected_total");
+                let incoming_block_number = incoming_block.number();
+                let incoming_block_hash = incoming_block.hash().encode_hex_with_prefix();
 
-        while let Ok((block_number, block_res, receipts_res)) = rx.recv_async().await {
-            let incoming_block = block_res
-                .map_err(|err| crate::Error::BlockFetchError {
-                    block_number,
-                    source: err,
-                })?
-                .ok_or(crate::Error::MissingBlock(block_number))?;
-            let receipts = receipts_res
-                .map_err(|err| crate::Error::BlockFetchError {
-                    block_number,
-                    source: err,
-                })?
-                .ok_or(crate::Error::MissingBlock(block_number))?;
+                if last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
+                    last_checkpoint.block_number == incoming_block_number
+                        && last_checkpoint.block_hash == incoming_block_hash
+                }) {
+                    continue;
+                }
 
-            let incoming_block_number = incoming_block.number();
-            let incoming_block_hash = incoming_block.hash().encode_hex_with_prefix();
-
-            if last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
-                last_checkpoint.block_number == incoming_block_number
-                    && last_checkpoint.block_hash == incoming_block_hash
-            }) {
-                continue;
-            }
-
-            let is_data_store_reorged = last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
-                incoming_block_number <= last_checkpoint.block_number
-            });
-
-            if is_data_store_reorged {
-                // 1. flush appender
-                // 2. delete reorged blocks from data store
-                // 3. continue
-                reorgs_detected_counter.increment(1);
-                todo!("Handle reorg in data store level")
-            } else {
-                let idx =
-                    block_queue.partition_point(|(b, _)| b.number() < incoming_block.number());
-                block_queue.insert(idx, (incoming_block, receipts));
-
-                while let Some((next_block, _)) = block_queue.front() {
-                    let next_block_number = next_block.number();
-                    let next_block_hash = next_block.hash().encode_hex_with_prefix();
-
-                    let is_next_block = match &last_checkpoint {
-                        Some(last_checkpoint) => {
-                            next_block_number == last_checkpoint.block_number + 1
-                        }
-                        None => next_block_number == 0,
-                    };
-
-                    if !is_next_block {
-                        break;
-                    }
-
-                    let is_reorged_block =
-                        last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
-                            last_checkpoint.block_number == next_block_number
-                                || next_block
-                                    .header
-                                    .parent_hash
-                                    .encode_hex_with_prefix()
-                                    .ne(&last_checkpoint.block_hash)
-                        });
-
-                    let (block, receipts) = block_queue.pop_front().unwrap();
-
-                    if is_reorged_block {
-                        continue;
-                    }
-
-                    if self.block_saver.save_block(block, receipts).await.is_err() {
-                        break;
-                    }
-
-                    last_checkpoint = Some(Checkpoint {
-                        block_number: next_block_number,
-                        block_hash: next_block_hash,
+                let is_data_store_reorged =
+                    last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
+                        incoming_block_number <= last_checkpoint.block_number
                     });
+
+                if is_data_store_reorged {
+                    // 1. flush appender
+                    // 2. delete reorged blocks from data store
+                    // 3. continue
+                    reorgs_detected_counter.increment(1);
+                    todo!("Handle reorg in data store level")
+                } else {
+                    let idx =
+                        block_queue.partition_point(|(b, _)| b.number() < incoming_block.number());
+                    block_queue.insert(idx, (incoming_block, receipts));
+
+                    while let Some((next_block, _)) = block_queue.front() {
+                        let next_block_number = next_block.number();
+                        let next_block_hash = next_block.hash().encode_hex_with_prefix();
+
+                        let is_next_block = match &last_checkpoint {
+                            Some(last_checkpoint) => {
+                                next_block_number == last_checkpoint.block_number + 1
+                            }
+                            None => next_block_number == 0,
+                        };
+
+                        if !is_next_block {
+                            break;
+                        }
+
+                        let is_reorged_block =
+                            last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
+                                last_checkpoint.block_number == next_block_number
+                                    || next_block
+                                        .header
+                                        .parent_hash
+                                        .encode_hex_with_prefix()
+                                        .ne(&last_checkpoint.block_hash)
+                            });
+
+                        let (block, receipts) = block_queue.pop_front().unwrap();
+
+                        if is_reorged_block {
+                            continue;
+                        }
+
+                        tx.send_async((block, receipts)).await.ok();
+
+                        last_checkpoint = Some(Checkpoint {
+                            block_number: next_block_number,
+                            block_hash: next_block_hash,
+                        });
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        });
+
+        Ok(Self {
+            block_fetcher,
+            block_saver,
+            task_handle: handle,
+        })
+    }
+
+    pub async fn wait_for_completion(self) -> Result<(), crate::Error> {
+        tokio::select! {
+            v = self.task_handle => {
+                v?
+            },
+            v = self.block_saver.task_handle => {
+                v?
+            },
+            v = self.block_fetcher.task_handle => {
+                v?
+            }
+        }
     }
 }

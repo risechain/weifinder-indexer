@@ -3,17 +3,17 @@ use std::{num::NonZeroUsize, sync::Arc, time::Instant};
 use alloy::{consensus::Transaction, hex::ToHexExt};
 use chrono::DateTime;
 use duckdb::{OptionalExt, params};
-use flume::{SendError, Sender};
+use flume::Sender;
 use metrics::{counter, histogram};
 use op_alloy_rpc_types::OpTransactionReceipt;
-use tokio::sync::RwLock;
-use tracing::error;
+use tokio::{sync::RwLock, task::JoinHandle};
 
-use crate::indexer::{Checkpoint, types::OpBlock};
+use crate::indexer::{Checkpoint, IndexerProvider, types::OpBlock};
 
 pub struct BlockSaver {
-    tx: Sender<(OpBlock, Vec<OpTransactionReceipt>)>,
+    pub tx: Sender<(OpBlock, Vec<OpTransactionReceipt>)>,
     last_checkpoint: Arc<RwLock<Option<Checkpoint>>>,
+    pub task_handle: JoinHandle<Result<(), crate::Error>>,
 }
 
 pub struct BlockSaverParams<'a> {
@@ -22,6 +22,7 @@ pub struct BlockSaverParams<'a> {
     pub s3_endpoint: &'a str,
     pub s3_access_key_id: &'a str,
     pub s3_secret_access_key: &'a str,
+    pub provider: IndexerProvider,
 }
 
 impl BlockSaver {
@@ -32,6 +33,7 @@ impl BlockSaver {
             s3_endpoint,
             s3_access_key_id,
             s3_secret_access_key,
+            provider,
         }: BlockSaverParams,
     ) -> Result<Self, crate::Error> {
         let data_conn = duckdb::Connection::open_in_memory()?;
@@ -52,7 +54,7 @@ impl BlockSaver {
 
                     ATTACH 'ducklake:postgres:{catalog_db_url}' AS data (
                         DATA_PATH 's3://indexer/data/',
-                        DATA_INLINING_ROW_LIMIT 10
+                        DATA_INLINING_ROW_LIMIT {}
                     );
                     USE data;
 
@@ -96,6 +98,7 @@ impl BlockSaver {
                         data BLOB NOT NULL
                     );
                 "#,
+                batch_save_size.get() - 1
             ))
             .unwrap();
 
@@ -124,34 +127,16 @@ impl BlockSaver {
         );
 
         let (tx, rx) =
-            flume::bounded::<(OpBlock, Vec<OpTransactionReceipt>)>(batch_save_size.get() * 10);
+            flume::bounded::<(OpBlock, Vec<OpTransactionReceipt>)>(batch_save_size.get());
 
-        tokio::task::spawn_blocking(move || {
-            let mut block_appender = match data_conn.appender("blocks") {
-                Ok(appender) => appender,
-                Err(err) => {
-                    error!("Failed to create block appender: {}", err);
-                    return;
-                }
-            };
+        let handle = tokio::task::spawn_blocking(move || {
+            let mut block_appender = data_conn.appender("blocks")?;
             let mut blocks_in_appender = 0;
 
-            let mut transaction_appender = match data_conn.appender("transactions") {
-                Ok(appender) => appender,
-                Err(err) => {
-                    error!("Failed to create transaction appender: {}", err);
-                    return;
-                }
-            };
+            let mut transaction_appender = data_conn.appender("transactions")?;
             let mut transactions_in_appender = 0;
 
-            let mut log_appender = match data_conn.appender("logs") {
-                Ok(appender) => appender,
-                Err(err) => {
-                    error!("Failed to create log appender: {}", err);
-                    return;
-                }
-            };
+            let mut log_appender = data_conn.appender("logs")?;
             let mut logs_in_appender = 0;
 
             let batch_size = batch_save_size.get();
@@ -159,12 +144,13 @@ impl BlockSaver {
             let append_duration_histogram = histogram!("indexer_duckdb_append_duration_seconds");
             let flush_duration_histogram = histogram!("indexer_duckdb_flush_duration_seconds");
 
-            'main: while let Ok((block, receipts)) = rx.recv() {
+            while let Ok((block, receipts)) = rx.recv() {
                 let append_start = Instant::now();
 
                 let block_number = block.number();
+                let block_hash = block.hash();
 
-                if let Err(err) = block_appender.append_row(params![
+                block_appender.append_row(params![
                     block_number,
                     block.hash().as_slice(),
                     DateTime::from_timestamp_secs(block.header.timestamp as i64)
@@ -177,29 +163,23 @@ impl BlockSaver {
                     block.header.receipts_root.as_slice(),
                     block.header.state_root.as_slice(),
                     block.header.size.as_ref().map(|size| size.to_string())
-                ]) {
-                    error!("Failed to append block to appender: {}", err);
-                    break;
-                }
+                ])?;
 
                 let receipts_len = receipts.len();
                 let mut block_transactions = block.transactions.into_transactions();
 
                 for receipt in receipts {
                     let tx = block_transactions
-                        .find(|tx| tx.info().hash.unwrap() == receipt.inner.transaction_hash);
+                        .find(|tx| tx.info().hash.unwrap() == receipt.inner.transaction_hash)
+                        .ok_or(crate::Error::MissingTransaction {
+                            transaction_hash: receipt
+                                .inner
+                                .transaction_hash
+                                .encode_hex_with_prefix(),
+                            block_hash: block_hash.encode_hex_with_prefix(),
+                        })?;
 
-                    let tx = if let Some(tx) = tx {
-                        tx
-                    } else {
-                        error!(
-                            "Transaction {:?} not found in block {}",
-                            receipt.inner.transaction_hash, block_number
-                        );
-                        break 'main;
-                    };
-
-                    if let Err(err) = transaction_appender.append_row(params![
+                    transaction_appender.append_row(params![
                         receipt.inner.block_number.unwrap(),
                         receipt.inner.transaction_index.unwrap(),
                         receipt.inner.transaction_hash.as_slice(),
@@ -223,15 +203,12 @@ impl BlockSaver {
                         tx.inner.as_recovered().input().iter().as_slice(),
                         tx.nonce(),
                         tx.value().to_string()
-                    ]) {
-                        error!("Failed to append receipt to appender: {}", err);
-                        break 'main;
-                    }
+                    ])?;
 
                     let logs_len = receipt.inner.logs().len();
 
                     for log in receipt.inner.logs() {
-                        if let Err(err) = log_appender.append_row(params![
+                        log_appender.append_row(params![
                             log.log_index.expect("block to exist"),
                             log.transaction_hash.expect("block to exist").as_slice(),
                             log.address().as_slice(),
@@ -240,10 +217,7 @@ impl BlockSaver {
                             log.topics().get(2).map(|topic| topic.as_slice()),
                             log.topics().get(3).map(|topic| topic.as_slice()),
                             log.data().data.iter().as_slice()
-                        ]) {
-                            error!("Failed to append log to appender: {}", err);
-                            break 'main;
-                        }
+                        ])?;
                     }
 
                     logs_in_appender += logs_len;
@@ -254,54 +228,69 @@ impl BlockSaver {
                 blocks_in_appender += 1;
                 transactions_in_appender += receipts_len;
 
-                if blocks_in_appender >= batch_size {
+                let at_tip = {
+                    let head = provider.current_head().borrow();
+                    head.hash == block_hash || head.parent_hash == block_hash
+                };
+
+                if blocks_in_appender >= batch_size || at_tip {
                     let flush_start = Instant::now();
-                    if let Err(err) = block_appender.flush() {
-                        error!("Failed to flush block appender: {}", err);
-                        break;
-                    }
+                    block_appender.flush()?;
                     flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
                     last_saved_block_counter.absolute(block_number);
-                    blocks_in_appender = 0;
+                    if blocks_in_appender >= batch_size {
+                        let txn = data_conn.unchecked_transaction()?;
+                        txn.execute(
+                            "CALL ducklake_flush_inlined_data('data', table_name => 'blocks')",
+                            [],
+                        )?;
+                        txn.commit()?;
+                        blocks_in_appender = 0;
+                    }
                 }
 
-                if transactions_in_appender >= batch_size {
+                if transactions_in_appender >= batch_size || at_tip {
                     let flush_start = Instant::now();
-                    if let Err(err) = transaction_appender.flush() {
-                        error!("Failed to flush transaction appender: {}", err);
-                        break;
-                    }
+                    transaction_appender.flush()?;
                     flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
-                    transactions_in_appender = 0;
+                    if transactions_in_appender >= batch_size {
+                        let txn = data_conn.unchecked_transaction()?;
+                        txn.execute(
+                            "CALL ducklake_flush_inlined_data('data', table_name => 'transactions')",
+                            []
+                        )?;
+                        txn.commit()?;
+                        transactions_in_appender = 0;
+                    }
                 }
 
-                if logs_in_appender >= batch_size {
+                if logs_in_appender >= batch_size || at_tip {
                     let flush_start = Instant::now();
-                    if let Err(err) = log_appender.flush() {
-                        error!("Failed to flush log appender: {}", err);
-                        break;
-                    }
+                    log_appender.flush()?;
                     flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
-                    logs_in_appender = 0;
+                    if logs_in_appender >= batch_size {
+                        let txn = data_conn.unchecked_transaction()?;
+                        txn.execute(
+                            "CALL ducklake_flush_inlined_data('data', table_name => 'logs')",
+                            [],
+                        )?;
+                        txn.commit()?;
+                        logs_in_appender = 0;
+                    }
                 }
             }
+
+            Result::<(), crate::Error>::Ok(())
         });
 
         Ok(Self {
             tx,
             last_checkpoint: Arc::new(RwLock::new(last_checkpoint)),
+            task_handle: handle,
         })
     }
 
     pub async fn last_saved_checkpoint(&self) -> Option<Checkpoint> {
         self.last_checkpoint.read().await.clone()
-    }
-
-    pub async fn save_block(
-        &self,
-        block: OpBlock,
-        receipts: Vec<OpTransactionReceipt>,
-    ) -> Result<(), SendError<(OpBlock, Vec<OpTransactionReceipt>)>> {
-        self.tx.send_async((block, receipts)).await
     }
 }
