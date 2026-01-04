@@ -234,7 +234,11 @@ fn render_stats_grid(buf: &mut ratatui::prelude::Buffer, area: Rect, snapshot: &
         buf,
         row2_cols[0],
         "Fetch Rate",
-        &format!("{:.1} blk/s", snapshot.fetch_rps),
+        &format!(
+            "{:.1} blk/s ({:.1} rps)",
+            snapshot.fetch_rps,
+            snapshot.fetch_rps * 2.0
+        ),
         Color::Cyan,
     );
     render_stat_box(buf, row2_cols[1], "Fetch p99", &p99_str, Color::Blue);

@@ -1,8 +1,4 @@
-use std::{
-    num::{NonZeroU32, NonZeroUsize},
-    sync::Arc,
-    time::Instant,
-};
+use std::{num::NonZeroU32, sync::Arc, time::Instant};
 
 use alloy::{
     eips::{BlockId, BlockNumberOrTag},
@@ -17,22 +13,6 @@ use tokio::sync::Semaphore;
 
 use crate::indexer::{provider::IndexerProvider, types::OpBlock};
 
-pub struct BlockFetcherParams {
-    pub max_concurrency: NonZeroUsize,
-    pub max_rps: NonZeroU32,
-    pub start_block: Option<u64>,
-}
-
-impl Default for BlockFetcherParams {
-    fn default() -> Self {
-        Self {
-            max_concurrency: NonZeroUsize::new(100).unwrap(),
-            max_rps: NonZeroU32::new(100).unwrap(),
-            start_block: None,
-        }
-    }
-}
-
 pub type FallibleMaybeBlock = Result<Option<OpBlock>, RpcError<TransportErrorKind>>;
 pub type FallibleMaybeReceipts =
     Result<Option<Vec<OpTransactionReceipt>>, RpcError<TransportErrorKind>>;
@@ -44,18 +24,17 @@ pub struct BlockFetcher {
 impl BlockFetcher {
     pub async fn fetch(
         provider: IndexerProvider,
-        params: BlockFetcherParams,
+        max_blocks_per_second: NonZeroU32,
+        start_block: Option<u64>,
     ) -> Result<Self, crate::error::Error> {
         let (tx, rx) = flume::bounded(1000);
 
         tokio::spawn(async move {
-            let semaphore = Arc::new(Semaphore::new(params.max_concurrency.get()));
-            let rate_limiter = RateLimiter::direct(Quota::per_second(
-                params.max_rps.div_ceil(NonZeroU32::new(2).unwrap()),
-            ));
+            let semaphore = Arc::new(Semaphore::new((max_blocks_per_second.get() as usize) * 2));
+            let rate_limiter = RateLimiter::direct(Quota::per_second(max_blocks_per_second));
 
             let mut current_head = provider.current_head().clone();
-            let mut fetching_block_number = params.start_block.unwrap_or(0);
+            let mut fetching_block_number = start_block.unwrap_or(0);
             let last_fetched_block_counter = counter!("indexer_last_fetched_block");
             let block_fetch_duration_histogram = histogram!("indexer_block_fetch_duration_seconds");
 

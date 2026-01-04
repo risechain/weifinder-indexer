@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub rpc_ws: String,
-    pub fetcher_max_concurrency: NonZeroUsize,
     pub fetcher_max_blocks_per_second: NonZeroU32,
     pub batch_save_size: NonZeroUsize,
     pub catalog_db_url: String,

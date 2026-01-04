@@ -10,7 +10,7 @@ pub use head_watcher::*;
 use op_alloy_rpc_types::OpTransactionReceipt;
 pub use provider::*;
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, num::NonZeroU32};
 
 use alloy::hex::ToHexExt;
 use metrics::counter;
@@ -30,8 +30,13 @@ pub struct ChainIndexer {
 
 impl ChainIndexer {
     pub async fn run(settings: &Settings) -> Result<Self, crate::Error> {
-        let provider =
-            IndexerProvider::new(&settings.rpc_ws, settings.fetcher_max_blocks_per_second).await?;
+        let provider = IndexerProvider::new(
+            &settings.rpc_ws,
+            settings
+                .fetcher_max_blocks_per_second
+                .saturating_mul(NonZeroU32::new(2).unwrap()),
+        )
+        .await?;
 
         let block_saver = BlockSaver::run(BlockSaverParams {
             batch_save_size: settings.batch_save_size,
@@ -45,11 +50,8 @@ impl ChainIndexer {
 
         let block_fetcher = BlockFetcher::fetch(
             provider,
-            BlockFetcherParams {
-                max_concurrency: settings.fetcher_max_concurrency,
-                max_rps: settings.fetcher_max_blocks_per_second,
-                start_block: last_checkpoint.as_ref().map(|c| c.block_number + 1),
-            },
+            settings.fetcher_max_blocks_per_second,
+            last_checkpoint.as_ref().map(|c| c.block_number + 1),
         )
         .await?;
 

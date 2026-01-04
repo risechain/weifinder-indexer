@@ -1,6 +1,6 @@
 use std::{num::NonZeroUsize, sync::Arc, time::Instant};
 
-use alloy::consensus::Transaction;
+use alloy::{consensus::Transaction, hex::ToHexExt};
 use chrono::DateTime;
 use duckdb::{OptionalExt, params};
 use flume::{SendError, Sender};
@@ -70,9 +70,9 @@ impl BlockSaver {
                     );
 
                     CREATE TABLE IF NOT EXISTS transactions (
-                        hash BLOB NOT NULL,
-                        index UINT64 NOT NULL,
                         block_number UINT64 NOT NULL,
+                        index UINT64 NOT NULL,
+                        hash BLOB NOT NULL,
                         from_address BLOB NOT NULL,
                         to_address BLOB,
                         effective_gas_price UINT64 NOT NULL,
@@ -84,6 +84,17 @@ impl BlockSaver {
                         nonce UINT64 NOT NULL,
                         value VARCHAR NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS logs (
+                        index UINT64 NOT NULL,
+                        transaction_hash BLOB NOT NULL,
+                        address BLOB NOT NULL,
+                        topic0 BLOB,
+                        topic1 BLOB,
+                        topic2 BLOB,
+                        topic3 BLOB,
+                        data BLOB NOT NULL
+                    );
                 "#,
             ))
             .unwrap();
@@ -94,9 +105,9 @@ impl BlockSaver {
                 [],
                 |row| {
                     row.get("number").and_then(|number: u64| {
-                        row.get("hash").map(|hash: String| Checkpoint {
+                        row.get("hash").map(|hash: Vec<u8>| Checkpoint {
                             block_number: number,
-                            block_hash: hash,
+                            block_hash: hash.encode_hex_with_prefix(),
                         })
                     })
                 },
@@ -123,6 +134,8 @@ impl BlockSaver {
                     return;
                 }
             };
+            let mut blocks_in_appender = 0;
+
             let mut transaction_appender = match data_conn.appender("transactions") {
                 Ok(appender) => appender,
                 Err(err) => {
@@ -130,10 +143,19 @@ impl BlockSaver {
                     return;
                 }
             };
+            let mut transactions_in_appender = 0;
+
+            let mut log_appender = match data_conn.appender("logs") {
+                Ok(appender) => appender,
+                Err(err) => {
+                    error!("Failed to create log appender: {}", err);
+                    return;
+                }
+            };
+            let mut logs_in_appender = 0;
 
             let batch_size = batch_save_size.get();
-            let mut blocks_in_appender = 0;
-            let mut transactions_in_appender = 0;
+
             let append_duration_histogram = histogram!("indexer_duckdb_append_duration_seconds");
             let flush_duration_histogram = histogram!("indexer_duckdb_flush_duration_seconds");
 
@@ -178,9 +200,9 @@ impl BlockSaver {
                     };
 
                     if let Err(err) = transaction_appender.append_row(params![
-                        receipt.inner.transaction_hash.as_slice(),
-                        receipt.inner.transaction_index.unwrap(),
                         receipt.inner.block_number.unwrap(),
+                        receipt.inner.transaction_index.unwrap(),
+                        receipt.inner.transaction_hash.as_slice(),
                         receipt.inner.from.as_slice(),
                         receipt.inner.to.as_ref().map(|to| to.as_slice()),
                         receipt.inner.effective_gas_price as u64,
@@ -205,6 +227,26 @@ impl BlockSaver {
                         error!("Failed to append receipt to appender: {}", err);
                         break 'main;
                     }
+
+                    let logs_len = receipt.inner.logs().len();
+
+                    for log in receipt.inner.logs() {
+                        if let Err(err) = log_appender.append_row(params![
+                            log.log_index.expect("block to exist"),
+                            log.transaction_hash.expect("block to exist").as_slice(),
+                            log.address().as_slice(),
+                            log.topic0().map(|topic| topic.as_slice()),
+                            log.topics().get(1).map(|topic| topic.as_slice()),
+                            log.topics().get(2).map(|topic| topic.as_slice()),
+                            log.topics().get(3).map(|topic| topic.as_slice()),
+                            log.data().data.iter().as_slice()
+                        ]) {
+                            error!("Failed to append log to appender: {}", err);
+                            break 'main;
+                        }
+                    }
+
+                    logs_in_appender += logs_len;
                 }
 
                 append_duration_histogram.record(append_start.elapsed().as_secs_f64());
@@ -231,6 +273,16 @@ impl BlockSaver {
                     }
                     flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
                     transactions_in_appender = 0;
+                }
+
+                if logs_in_appender >= batch_size {
+                    let flush_start = Instant::now();
+                    if let Err(err) = log_appender.flush() {
+                        error!("Failed to flush log appender: {}", err);
+                        break;
+                    }
+                    flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
+                    logs_in_appender = 0;
                 }
             }
         });
