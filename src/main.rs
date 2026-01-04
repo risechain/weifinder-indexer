@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         .add_source(config::File::from(cli_args.config))
         .add_source(config::Environment::with_prefix("INDEXER"))
         .set_default("fetcher_max_concurrency", 100)?
-        .set_default("fetcher_max_rps", 100)?
+        .set_default("fetcher_max_blocks_per_second", 100)?
         .set_default("batch_save_size", 1000)?
         .build()?
         .try_deserialize()?;

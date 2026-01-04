@@ -4,6 +4,7 @@ use alloy::{
     rpc::types::Header,
 };
 use metrics::counter;
+use op_alloy_network::Optimism;
 use tokio::sync::watch;
 use tracing::error;
 
@@ -13,7 +14,7 @@ pub struct ChainHeadWatcher {
 }
 
 impl ChainHeadWatcher {
-    pub async fn watch(provider: RootProvider) -> Result<Self, crate::error::Error> {
+    pub async fn watch(provider: RootProvider<Optimism>) -> Result<Self, crate::error::Error> {
         let current_head_counter = counter!("indexer_current_head_number");
         let current_head = provider
             .get_block(BlockId::latest())

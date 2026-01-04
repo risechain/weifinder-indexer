@@ -5,17 +5,17 @@ use std::{
 };
 
 use alloy::{
-    eips::BlockNumberOrTag,
+    eips::{BlockId, BlockNumberOrTag},
     providers::Provider,
-    rpc::types::Block,
     transports::{RpcError, TransportErrorKind},
 };
 use flume::Receiver;
 use governor::{Quota, RateLimiter};
 use metrics::{counter, histogram};
+use op_alloy_rpc_types::OpTransactionReceipt;
 use tokio::sync::Semaphore;
 
-use crate::indexer::provider::IndexerProvider;
+use crate::indexer::{provider::IndexerProvider, types::OpBlock};
 
 pub struct BlockFetcherParams {
     pub max_concurrency: NonZeroUsize,
@@ -33,10 +33,12 @@ impl Default for BlockFetcherParams {
     }
 }
 
-pub type FallibleMaybeBlock = Result<Option<Block>, RpcError<TransportErrorKind>>;
+pub type FallibleMaybeBlock = Result<Option<OpBlock>, RpcError<TransportErrorKind>>;
+pub type FallibleMaybeReceipts =
+    Result<Option<Vec<OpTransactionReceipt>>, RpcError<TransportErrorKind>>;
 
 pub struct BlockFetcher {
-    rx: Receiver<(u64, FallibleMaybeBlock)>,
+    rx: Receiver<(u64, FallibleMaybeBlock, FallibleMaybeReceipts)>,
 }
 
 impl BlockFetcher {
@@ -48,7 +50,9 @@ impl BlockFetcher {
 
         tokio::spawn(async move {
             let semaphore = Arc::new(Semaphore::new(params.max_concurrency.get()));
-            let rate_limiter = RateLimiter::direct(Quota::per_second(params.max_rps));
+            let rate_limiter = RateLimiter::direct(Quota::per_second(
+                params.max_rps.div_ceil(NonZeroU32::new(2).unwrap()),
+            ));
 
             let mut current_head = provider.current_head().clone();
             let mut fetching_block_number = params.start_block.unwrap_or(0);
@@ -92,12 +96,16 @@ impl BlockFetcher {
 
                 tokio::spawn(async move {
                     let fetch_start = Instant::now();
-                    let block = provider
-                        .get_block_by_number(BlockNumberOrTag::Number(fetching_block_number))
-                        .await;
+                    let block_number = BlockNumberOrTag::Number(fetching_block_number);
+                    let (block, receipts) = tokio::join!(
+                        provider.get_block_by_number(block_number).full(),
+                        provider.get_block_receipts(BlockId::Number(block_number))
+                    );
                     block_fetch_duration_histogram.record(fetch_start.elapsed().as_secs_f64());
 
-                    tx.send_async((fetching_block_number, block)).await.unwrap();
+                    tx.send_async((fetching_block_number, block, receipts))
+                        .await
+                        .unwrap();
 
                     drop(permit)
                 });
@@ -111,7 +119,7 @@ impl BlockFetcher {
         Ok(Self { rx })
     }
 
-    pub fn receiver(&self) -> &Receiver<(u64, FallibleMaybeBlock)> {
+    pub fn receiver(&self) -> &Receiver<(u64, FallibleMaybeBlock, FallibleMaybeReceipts)> {
         &self.rx
     }
 }

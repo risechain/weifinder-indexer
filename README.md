@@ -37,7 +37,7 @@ The indexer is configured via the `Settings` struct:
 |---------|-------------|
 | `rpc_url` | WebSocket RPC endpoint URL |
 | `fetcher_max_concurrency` | Maximum concurrent block fetch requests |
-| `fetcher_max_rps` | Maximum requests per second |
+| `fetcher_max_blocks_per_second` | Maximum blocks to fetch per second (a single block may contain multiple RPC requests. e.g, `eth_getBlockByNumber` and `eth_getBlockReceipts`) |
 
 ## Usage
 

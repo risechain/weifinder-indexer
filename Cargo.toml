@@ -6,15 +6,19 @@ edition = "2024"
 [dependencies]
 alloy = { version = "1.2.1", features = ["provider-ws"] }
 anyhow = "1.0.100"
+chrono = "0.4.42"
 clap = { version = "4.5.53", features = ["derive"] }
 config = "0.15.19"
-duckdb = { version = "1.4.3", features = ["bundled"] }
+duckdb = { version = "1.4.3", features = ["bundled", "chrono"] }
 flume = "0.12.0"
 governor = "0.10.4"
 log = "0.4"
 metrics = "0.24.3"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
 metrics-util = "0.20.1"
+op-alloy-consensus = "0.23.1"
+op-alloy-network = "0.23.1"
+op-alloy-rpc-types = "0.23.1"
 ratatui = "0.30.0"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.17"
