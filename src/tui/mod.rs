@@ -27,6 +27,12 @@ pub struct Tui {
     pub stats: Arc<Mutex<Stats>>,
 }
 
+impl Default for Tui {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Tui {
     pub fn new() -> Self {
         let mut terminal = ratatui::init();
@@ -37,19 +43,17 @@ impl Tui {
             loop {
                 terminal.draw(|frame| frame.render_widget(&tui_widget, frame.area()))?;
 
-                if event::poll(Duration::from_millis(200))? {
-                    if let Event::Key(key_event) = event::read()?
+                if event::poll(Duration::from_millis(200))?
+                    && let Event::Key(key_event) = event::read()?
                         && key_event.kind == KeyEventKind::Press
-                    {
-                        if let KeyCode::Char('q') = key_event.code {
+                        && let KeyCode::Char('q') = key_event.code {
                             break;
                         }
-                    }
-                }
 
                 tui_widget.update();
             }
-            Ok(ratatui::restore())
+            ratatui::restore();
+            Ok(())
         });
 
         Self {

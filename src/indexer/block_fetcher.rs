@@ -52,7 +52,7 @@ impl BlockFetcher {
                     current_head
                         .changed()
                         .await
-                        .map_err(|err| crate::Error::HeadWatcherClosed(err))?;
+                        .map_err(crate::Error::HeadWatcherClosed)?;
                     current_head.mark_changed();
                     continue;
                 } else if fetching_block_number >= current_head_number {
