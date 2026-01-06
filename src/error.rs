@@ -3,17 +3,17 @@ use tokio::sync::watch;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("RPC error")]
+    #[error("RPC error: {0}")]
     RpcError(#[from] RpcError<TransportErrorKind>),
     #[error("Missing block {0}")]
     MissingBlock(u64),
-    #[error("Block fetch error #{block_number}")]
+    #[error("Block fetch error #{block_number}: {source}")]
     BlockFetchError {
         block_number: u64,
         #[source]
         source: RpcError<TransportErrorKind>,
     },
-    #[error("Data store error")]
+    #[error("Data store error: {0}")]
     DataStoreError(#[from] duckdb::Error),
     #[error("Missing transaction {transaction_hash} in block {block_hash}")]
     MissingTransaction {

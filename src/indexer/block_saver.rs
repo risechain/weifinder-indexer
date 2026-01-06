@@ -47,12 +47,11 @@ impl BlockSaver {
             provider,
         }: BlockSaverParams,
     ) -> Result<Self, crate::Error> {
-        let data_conn = duckdb::Connection::open_in_memory()?;
+        let data_conn = duckdb::Connection::open("/tmp/data.duckdb")?;
         let is_remote = !s3_endpoint.starts_with("localhost");
 
-        data_conn
-            .execute_batch(&format!(
-                r#"
+        data_conn.execute_batch(&format!(
+            r#"
                     CREATE OR REPLACE SECRET secret (
                         TYPE s3,
                         PROVIDER config,
@@ -63,11 +62,11 @@ impl BlockSaver {
                         SECRET '{s3_secret_access_key}'
                     );
 
-                    ATTACH 'ducklake:postgres:{catalog_db_url}' AS data (
+                    ATTACH 'ducklake:postgres:{catalog_db_url}' AS weifinder_data (
                         DATA_PATH 's3://weifinder-data/data/',
                         DATA_INLINING_ROW_LIMIT {}
                     );
-                    USE data;
+                    USE weifinder_data;
 
                     CREATE TABLE IF NOT EXISTS blocks (
                         number UINT64 NOT NULL,
@@ -109,9 +108,8 @@ impl BlockSaver {
                         data BLOB NOT NULL
                     );
                 "#,
-                batch_save_size.get() - 1
-            ))
-            .unwrap();
+            batch_save_size.get() - 1
+        ))?;
 
         let last_checkpoint = data_conn
             .query_row(
@@ -255,7 +253,7 @@ impl BlockSaver {
                             if blocks_in_appender >= batch_size {
                                 let txn = data_conn.unchecked_transaction()?;
                                 txn.execute(
-                                    "CALL ducklake_flush_inlined_data('data', table_name => 'blocks')",
+                                    "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'blocks')",
                                     [],
                                 )?;
                                 txn.commit()?;
@@ -270,7 +268,7 @@ impl BlockSaver {
                             if transactions_in_appender >= batch_size {
                                 let txn = data_conn.unchecked_transaction()?;
                                 txn.execute(
-                                    "CALL ducklake_flush_inlined_data('data', table_name => 'transactions')",
+                                    "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'transactions')",
                                     []
                                 )?;
                                 txn.commit()?;
@@ -285,7 +283,7 @@ impl BlockSaver {
                             if logs_in_appender >= batch_size {
                                 let txn = data_conn.unchecked_transaction()?;
                                 txn.execute(
-                                    "CALL ducklake_flush_inlined_data('data', table_name => 'logs')",
+                                    "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'logs')",
                                     [],
                                 )?;
                                 txn.commit()?;
