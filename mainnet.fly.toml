@@ -27,3 +27,7 @@ primary_region = 'nrt'
 [metrics]
   port = 9000
   path = '/metrics'
+
+[mounts]
+  source = "indexer_volume_mainnet"
+  destination = "/tmp"

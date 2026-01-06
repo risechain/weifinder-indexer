@@ -27,3 +27,7 @@ primary_region = 'iad'
 [metrics]
   port = 9000
   path = '/metrics'
+
+[mounts]
+  source = "indexer_volume"
+  destination = "/tmp"
