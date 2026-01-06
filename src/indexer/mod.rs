@@ -46,6 +46,7 @@ impl ChainIndexer {
             s3_endpoint: &settings.s3_endpoint,
             s3_access_key_id: &settings.s3_access_key_id,
             s3_secret_access_key: &settings.s3_secret_access_key,
+            s3_bucket: &settings.s3_bucket,
             provider: provider.clone(),
         })?;
 

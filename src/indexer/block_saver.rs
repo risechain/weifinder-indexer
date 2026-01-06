@@ -33,6 +33,7 @@ pub struct BlockSaverParams<'a> {
     pub s3_endpoint: &'a str,
     pub s3_access_key_id: &'a str,
     pub s3_secret_access_key: &'a str,
+    pub s3_bucket: &'a str,
     pub provider: IndexerProvider,
 }
 
@@ -44,6 +45,7 @@ impl BlockSaver {
             s3_endpoint,
             s3_access_key_id,
             s3_secret_access_key,
+            s3_bucket,
             provider,
         }: BlockSaverParams,
     ) -> Result<Self, crate::Error> {
@@ -63,7 +65,7 @@ impl BlockSaver {
                     );
 
                     ATTACH 'ducklake:postgres:{catalog_db_url}' AS weifinder_data (
-                        DATA_PATH 's3://weifinder-data/data/',
+                        DATA_PATH 's3://{s3_bucket}/data/',
                         DATA_INLINING_ROW_LIMIT {}
                     );
                     USE weifinder_data;
