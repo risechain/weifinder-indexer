@@ -1,0 +1,4 @@
+fetcher_max_blocks_per_second = 500
+rpc_ws = "wss://indexing.testnet.riselabs.xyz/ws"
+batch_save_size = 200000
+s3_endpoint = 'fly.storage.tigris.dev'

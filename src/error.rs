@@ -24,4 +24,6 @@ pub enum Error {
     HeadWatcherClosed(#[source] watch::error::RecvError),
     #[error("Join error")]
     JoinError(#[from] tokio::task::JoinError),
+    #[error("oneshot Recv error")]
+    OneshotRecvError(#[from] tokio::sync::oneshot::error::RecvError),
 }

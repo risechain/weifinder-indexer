@@ -6,7 +6,8 @@
 - [x] Add --headless cli option to skip tui
 - [x] Attach to remote duckdb and object storage
 - [x] Add more tables to duckdb
-- [ ] use insert with data inlining instead when at the tip of the chain
-- [ ] Create docker file
+- [x] use insert with data inlining instead when at the tip of the chain
+- [x] Create docker file
+- [x] Better error handling
+- [ ] Handle storage-level reorg
 - [ ] Deploy to fly.io
-- [ ] Better error handling

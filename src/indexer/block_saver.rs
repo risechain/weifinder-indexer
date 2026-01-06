@@ -10,8 +10,19 @@ use tokio::{sync::RwLock, task::JoinHandle};
 
 use crate::indexer::{Checkpoint, IndexerProvider, types::OpBlock};
 
+pub enum BlockSavePayload {
+    NewBlock {
+        block: OpBlock,
+        receipts: Vec<OpTransactionReceipt>,
+    },
+    Reorg {
+        new_block_number: u64,
+        prev_checkpoint_tx: tokio::sync::oneshot::Sender<Checkpoint>,
+    },
+}
+
 pub struct BlockSaver {
-    pub tx: Sender<(OpBlock, Vec<OpTransactionReceipt>)>,
+    pub tx: Sender<BlockSavePayload>,
     last_checkpoint: Arc<RwLock<Option<Checkpoint>>>,
     pub task_handle: JoinHandle<Result<(), crate::Error>>,
 }
@@ -53,7 +64,7 @@ impl BlockSaver {
                     );
 
                     ATTACH 'ducklake:postgres:{catalog_db_url}' AS data (
-                        DATA_PATH 's3://indexer/data/',
+                        DATA_PATH 's3://weifinder-data/data/',
                         DATA_INLINING_ROW_LIMIT {}
                     );
                     USE data;
@@ -126,8 +137,7 @@ impl BlockSaver {
                 .unwrap_or(0),
         );
 
-        let (tx, rx) =
-            flume::bounded::<(OpBlock, Vec<OpTransactionReceipt>)>(batch_save_size.get());
+        let (tx, rx) = flume::bounded::<BlockSavePayload>(batch_save_size.get());
 
         let handle = tokio::task::spawn_blocking(move || {
             let mut block_appender = data_conn.appender("blocks")?;
@@ -144,138 +154,189 @@ impl BlockSaver {
             let append_duration_histogram = histogram!("indexer_duckdb_append_duration_seconds");
             let flush_duration_histogram = histogram!("indexer_duckdb_flush_duration_seconds");
 
-            while let Ok((block, receipts)) = rx.recv() {
-                let append_start = Instant::now();
+            while let Ok(payload) = rx.recv() {
+                match payload {
+                    BlockSavePayload::NewBlock { block, receipts } => {
+                        let append_start = Instant::now();
 
-                let block_number = block.number();
-                let block_hash = block.hash();
+                        let block_number = block.number();
+                        let block_hash = block.hash();
 
-                block_appender.append_row(params![
-                    block_number,
-                    block.hash().as_slice(),
-                    DateTime::from_timestamp_secs(block.header.timestamp as i64)
-                        .unwrap()
-                        .naive_utc(),
-                    block.header.parent_hash.as_slice(),
-                    block.header.gas_used,
-                    block.header.gas_limit,
-                    block.header.transactions_root.as_slice(),
-                    block.header.receipts_root.as_slice(),
-                    block.header.state_root.as_slice(),
-                    block.header.size.as_ref().map(|size| size.to_string())
-                ])?;
-
-                let receipts_len = receipts.len();
-                let mut block_transactions = block.transactions.into_transactions();
-
-                for receipt in receipts {
-                    let tx = block_transactions
-                        .find(|tx| tx.info().hash.unwrap() == receipt.inner.transaction_hash)
-                        .ok_or(crate::Error::MissingTransaction {
-                            transaction_hash: receipt
-                                .inner
-                                .transaction_hash
-                                .encode_hex_with_prefix(),
-                            block_hash: block_hash.encode_hex_with_prefix(),
-                        })?;
-
-                    transaction_appender.append_row(params![
-                        receipt.inner.block_number.unwrap(),
-                        receipt.inner.transaction_index.unwrap(),
-                        receipt.inner.transaction_hash.as_slice(),
-                        receipt.inner.from.as_slice(),
-                        receipt.inner.to.as_ref().map(|to| to.as_slice()),
-                        receipt.inner.effective_gas_price as u64,
-                        receipt.inner.gas_used,
-                        receipt
-                            .inner
-                            .contract_address
-                            .as_ref()
-                            .map(|contract| contract.as_slice()),
-                        receipt.inner.inner.receipt.tx_type() as u8,
-                        receipt
-                            .inner
-                            .inner
-                            .receipt
-                            .as_receipt()
-                            .status
-                            .coerce_status(),
-                        tx.inner.as_recovered().input().iter().as_slice(),
-                        tx.nonce(),
-                        tx.value().to_string()
-                    ])?;
-
-                    let logs_len = receipt.inner.logs().len();
-
-                    for log in receipt.inner.logs() {
-                        log_appender.append_row(params![
-                            log.log_index.expect("block to exist"),
-                            log.transaction_hash.expect("block to exist").as_slice(),
-                            log.address().as_slice(),
-                            log.topic0().map(|topic| topic.as_slice()),
-                            log.topics().get(1).map(|topic| topic.as_slice()),
-                            log.topics().get(2).map(|topic| topic.as_slice()),
-                            log.topics().get(3).map(|topic| topic.as_slice()),
-                            log.data().data.iter().as_slice()
+                        block_appender.append_row(params![
+                            block_number,
+                            block.hash().as_slice(),
+                            DateTime::from_timestamp_secs(block.header.timestamp as i64)
+                                .unwrap()
+                                .naive_utc(),
+                            block.header.parent_hash.as_slice(),
+                            block.header.gas_used,
+                            block.header.gas_limit,
+                            block.header.transactions_root.as_slice(),
+                            block.header.receipts_root.as_slice(),
+                            block.header.state_root.as_slice(),
+                            block.header.size.as_ref().map(|size| size.to_string())
                         ])?;
+
+                        let receipts_len = receipts.len();
+                        let mut block_transactions = block.transactions.into_transactions();
+
+                        for receipt in receipts {
+                            let tx = block_transactions
+                                .find(|tx| {
+                                    tx.info().hash.unwrap() == receipt.inner.transaction_hash
+                                })
+                                .ok_or(crate::Error::MissingTransaction {
+                                    transaction_hash: receipt
+                                        .inner
+                                        .transaction_hash
+                                        .encode_hex_with_prefix(),
+                                    block_hash: block_hash.encode_hex_with_prefix(),
+                                })?;
+
+                            transaction_appender.append_row(params![
+                                receipt.inner.block_number.unwrap(),
+                                receipt.inner.transaction_index.unwrap(),
+                                receipt.inner.transaction_hash.as_slice(),
+                                receipt.inner.from.as_slice(),
+                                receipt.inner.to.as_ref().map(|to| to.as_slice()),
+                                receipt.inner.effective_gas_price as u64,
+                                receipt.inner.gas_used,
+                                receipt
+                                    .inner
+                                    .contract_address
+                                    .as_ref()
+                                    .map(|contract| contract.as_slice()),
+                                receipt.inner.inner.receipt.tx_type() as u8,
+                                receipt
+                                    .inner
+                                    .inner
+                                    .receipt
+                                    .as_receipt()
+                                    .status
+                                    .coerce_status(),
+                                tx.inner.as_recovered().input().iter().as_slice(),
+                                tx.nonce(),
+                                tx.value().to_string()
+                            ])?;
+
+                            let logs_len = receipt.inner.logs().len();
+
+                            for log in receipt.inner.logs() {
+                                log_appender.append_row(params![
+                                    log.log_index.expect("block to exist"),
+                                    log.transaction_hash.expect("block to exist").as_slice(),
+                                    log.address().as_slice(),
+                                    log.topic0().map(|topic| topic.as_slice()),
+                                    log.topics().get(1).map(|topic| topic.as_slice()),
+                                    log.topics().get(2).map(|topic| topic.as_slice()),
+                                    log.topics().get(3).map(|topic| topic.as_slice()),
+                                    log.data().data.iter().as_slice()
+                                ])?;
+                            }
+
+                            logs_in_appender += logs_len;
+                        }
+
+                        append_duration_histogram.record(append_start.elapsed().as_secs_f64());
+
+                        blocks_in_appender += 1;
+                        transactions_in_appender += receipts_len;
+
+                        let at_tip = {
+                            let head = provider.current_head().borrow();
+                            head.hash == block_hash || head.parent_hash == block_hash
+                        };
+
+                        if blocks_in_appender >= batch_size || at_tip {
+                            let flush_start = Instant::now();
+                            block_appender.flush()?;
+                            flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
+                            last_saved_block_counter.absolute(block_number);
+                            if blocks_in_appender >= batch_size {
+                                let txn = data_conn.unchecked_transaction()?;
+                                txn.execute(
+                                    "CALL ducklake_flush_inlined_data('data', table_name => 'blocks')",
+                                    [],
+                                )?;
+                                txn.commit()?;
+                                blocks_in_appender = 0;
+                            }
+                        }
+
+                        if transactions_in_appender >= batch_size || at_tip {
+                            let flush_start = Instant::now();
+                            transaction_appender.flush()?;
+                            flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
+                            if transactions_in_appender >= batch_size {
+                                let txn = data_conn.unchecked_transaction()?;
+                                txn.execute(
+                                    "CALL ducklake_flush_inlined_data('data', table_name => 'transactions')",
+                                    []
+                                )?;
+                                txn.commit()?;
+                                transactions_in_appender = 0;
+                            }
+                        }
+
+                        if logs_in_appender >= batch_size || at_tip {
+                            let flush_start = Instant::now();
+                            log_appender.flush()?;
+                            flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
+                            if logs_in_appender >= batch_size {
+                                let txn = data_conn.unchecked_transaction()?;
+                                txn.execute(
+                                    "CALL ducklake_flush_inlined_data('data', table_name => 'logs')",
+                                    [],
+                                )?;
+                                txn.commit()?;
+                                logs_in_appender = 0;
+                            }
+                        }
                     }
-
-                    logs_in_appender += logs_len;
-                }
-
-                append_duration_histogram.record(append_start.elapsed().as_secs_f64());
-
-                blocks_in_appender += 1;
-                transactions_in_appender += receipts_len;
-
-                let at_tip = {
-                    let head = provider.current_head().borrow();
-                    head.hash == block_hash || head.parent_hash == block_hash
-                };
-
-                if blocks_in_appender >= batch_size || at_tip {
-                    let flush_start = Instant::now();
-                    block_appender.flush()?;
-                    flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
-                    last_saved_block_counter.absolute(block_number);
-                    if blocks_in_appender >= batch_size {
-                        let txn = data_conn.unchecked_transaction()?;
-                        txn.execute(
-                            "CALL ducklake_flush_inlined_data('data', table_name => 'blocks')",
-                            [],
+                    BlockSavePayload::Reorg {
+                        new_block_number,
+                        prev_checkpoint_tx,
+                    } => {
+                        let last_checkpoint = data_conn.query_row(
+                            "SELECT number, hash FROM blocks WHERE number = $1",
+                            [new_block_number - 1],
+                            |row| {
+                                row.get("number").and_then(|number: u64| {
+                                    row.get("hash").map(|hash: Vec<u8>| Checkpoint {
+                                        block_number: number,
+                                        block_hash: hash.encode_hex_with_prefix(),
+                                    })
+                                })
+                            },
                         )?;
-                        txn.commit()?;
-                        blocks_in_appender = 0;
-                    }
-                }
+                        prev_checkpoint_tx.send(last_checkpoint).ok();
 
-                if transactions_in_appender >= batch_size || at_tip {
-                    let flush_start = Instant::now();
-                    transaction_appender.flush()?;
-                    flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
-                    if transactions_in_appender >= batch_size {
-                        let txn = data_conn.unchecked_transaction()?;
-                        txn.execute(
-                            "CALL ducklake_flush_inlined_data('data', table_name => 'transactions')",
-                            []
+                        block_appender.flush()?;
+                        transaction_appender.flush()?;
+                        log_appender.flush()?;
+                        data_conn.execute(
+                            r#"
+                                DELETE FROM logs
+                                WHERE transaction_hash IN (
+                                    SELECT hash FROM transactions WHERE block_number >= $1
+                                )
+                            "#,
+                            [new_block_number],
                         )?;
-                        txn.commit()?;
-                        transactions_in_appender = 0;
-                    }
-                }
-
-                if logs_in_appender >= batch_size || at_tip {
-                    let flush_start = Instant::now();
-                    log_appender.flush()?;
-                    flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
-                    if logs_in_appender >= batch_size {
-                        let txn = data_conn.unchecked_transaction()?;
-                        txn.execute(
-                            "CALL ducklake_flush_inlined_data('data', table_name => 'logs')",
-                            [],
+                        data_conn.execute(
+                            r#"
+                                DELETE FROM transactions
+                                WHERE block_number >= $1
+                            "#,
+                            [new_block_number],
                         )?;
-                        txn.commit()?;
-                        logs_in_appender = 0;
+                        data_conn.execute(
+                            r#"
+                                DELETE FROM blocks
+                                WHERE number >= $1
+                            "#,
+                            [new_block_number],
+                        )?;
                     }
                 }
             }
