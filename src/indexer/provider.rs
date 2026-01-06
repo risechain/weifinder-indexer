@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 
 use alloy::{
-    providers::{Provider, ProviderBuilder, RootProvider, WsConnect},
+    providers::{Provider, ProviderBuilder, RootProvider, WebSocketConfig, WsConnect},
     rpc::{client::ClientBuilder, types::Header},
     transports::layers::RetryBackoffLayer,
 };
@@ -28,7 +28,11 @@ impl IndexerProvider {
                     .unwrap()
                     .get() as u64,
             ))
-            .ws(WsConnect::new(rpc_ws))
+            .ws(WsConnect::new(rpc_ws).with_config(
+                WebSocketConfig::default()
+                    .max_message_size(Some(256 << 20))
+                    .max_frame_size(Some(64 << 20)),
+            ))
             .await?;
         let provider = ProviderBuilder::new()
             .disable_recommended_fillers()
