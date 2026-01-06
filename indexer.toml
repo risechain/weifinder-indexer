@@ -1,4 +1,3 @@
 fetcher_max_blocks_per_second = 500
-rpc_ws = "wss://indexing.testnet.riselabs.xyz/ws"
 batch_save_size = 10000
 s3_endpoint = 'localhost:9000'
