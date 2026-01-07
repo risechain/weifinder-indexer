@@ -9,5 +9,6 @@
 - [x] use insert with data inlining instead when at the tip of the chain
 - [x] Create docker file
 - [x] Better error handling
-- [ ] Handle storage-level reorg
-- [ ] Deploy to fly.io
+- [x] Handle storage-level reorg
+- [x] Deploy to fly.io
+- [ ] Fix checkpointing for different tables i.e blocks, transactions and logs all save independently but checkpoint is only take from the blocks table. We need more granular checkpoints for each table
