@@ -49,7 +49,7 @@ impl BlockSaver {
             provider,
         }: BlockSaverParams,
     ) -> Result<Self, crate::Error> {
-        let data_conn = duckdb::Connection::open("/tmp/data.duckdb")?;
+        let data_conn = duckdb::Connection::open_in_memory()?;
         let is_remote = !s3_endpoint.starts_with("localhost");
 
         data_conn.execute_batch(&format!(
