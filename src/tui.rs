@@ -45,10 +45,11 @@ impl Tui {
 
                 if event::poll(Duration::from_millis(200))?
                     && let Event::Key(key_event) = event::read()?
-                        && key_event.kind == KeyEventKind::Press
-                        && let KeyCode::Char('q') = key_event.code {
-                            break;
-                        }
+                    && key_event.kind == KeyEventKind::Press
+                    && let KeyCode::Char('q') = key_event.code
+                {
+                    break;
+                }
 
                 tui_widget.update();
             }

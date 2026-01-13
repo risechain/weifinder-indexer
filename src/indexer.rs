@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 
 use std::{collections::VecDeque, num::NonZeroU32};
 
-use alloy::hex::ToHexExt;
+use alloy::{hex::ToHexExt, rpc::types::trace::parity::TraceResultsWithTransactionHash};
 use metrics::counter;
 
 use crate::{indexer::types::OpBlock, settings::Settings};
@@ -63,11 +63,17 @@ impl ChainIndexer {
         let saver = block_saver.tx.clone();
 
         let handle = tokio::spawn(async move {
-            let mut block_queue: VecDeque<(OpBlock, Vec<OpTransactionReceipt>)> = VecDeque::new();
+            let mut block_queue: VecDeque<(
+                OpBlock,
+                Vec<OpTransactionReceipt>,
+                Vec<TraceResultsWithTransactionHash>,
+            )> = VecDeque::new();
 
             let reorgs_detected_counter = counter!("indexer_reorgs_detected_total");
 
-            while let Ok((block_number, block_res, receipts_res)) = fetcher.recv_async().await {
+            while let Ok((block_number, block_res, receipts_res, traces_res)) =
+                fetcher.recv_async().await
+            {
                 let incoming_block = block_res
                     .map_err(|err| crate::Error::BlockFetchError {
                         block_number,
@@ -80,6 +86,10 @@ impl ChainIndexer {
                         source: err,
                     })?
                     .ok_or(crate::Error::MissingBlock(block_number))?;
+                let traces = traces_res.map_err(|err| crate::Error::BlockFetchError {
+                    block_number,
+                    source: err,
+                })?;
 
                 let incoming_block_number = incoming_block.number();
                 let incoming_block_hash = incoming_block.hash().encode_hex_with_prefix();
@@ -108,10 +118,11 @@ impl ChainIndexer {
                     last_checkpoint = Some(rx.await?);
                 }
 
-                let idx = block_queue.partition_point(|(b, _)| b.number() < incoming_block_number);
-                block_queue.insert(idx, (incoming_block, receipts));
+                let idx =
+                    block_queue.partition_point(|(b, _, _)| b.number() < incoming_block_number);
+                block_queue.insert(idx, (incoming_block, receipts, traces));
 
-                while let Some((next_block, _)) = block_queue.front() {
+                while let Some((next_block, _, _)) = block_queue.front() {
                     let next_block_number = next_block.number();
                     let next_block_hash = next_block.hash().encode_hex_with_prefix();
 
@@ -136,14 +147,18 @@ impl ChainIndexer {
                                     .ne(&last_checkpoint.block_hash)
                         });
 
-                    let (block, receipts) = block_queue.pop_front().unwrap();
+                    let (block, receipts, traces) = block_queue.pop_front().unwrap();
 
                     if is_reorged_block {
                         continue;
                     }
 
                     saver
-                        .send_async(BlockSavePayload::NewBlock { block, receipts })
+                        .send_async(BlockSavePayload::NewBlock {
+                            block,
+                            receipts,
+                            traces,
+                        })
                         .await
                         .ok();
 

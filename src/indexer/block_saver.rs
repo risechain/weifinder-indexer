@@ -1,6 +1,10 @@
 use std::{num::NonZeroUsize, sync::Arc, time::Instant};
 
-use alloy::{consensus::Transaction, hex::ToHexExt};
+use alloy::{
+    consensus::Transaction,
+    hex::ToHexExt,
+    rpc::types::trace::parity::{Action, CallType, TraceResultsWithTransactionHash},
+};
 use chrono::DateTime;
 use duckdb::{OptionalExt, params};
 use flume::Sender;
@@ -10,10 +14,12 @@ use tokio::{sync::RwLock, task::JoinHandle};
 
 use crate::indexer::{Checkpoint, IndexerProvider, types::OpBlock};
 
+#[allow(clippy::large_enum_variant)]
 pub enum BlockSavePayload {
     NewBlock {
         block: OpBlock,
         receipts: Vec<OpTransactionReceipt>,
+        traces: Vec<TraceResultsWithTransactionHash>,
     },
     Reorg {
         new_block_number: u64,
@@ -109,6 +115,15 @@ impl BlockSaver {
                         topic3 BLOB,
                         data BLOB NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS inner_transactions (
+                        parent_transaction_hash BLOB NOT NULL,
+                        from BLOB NOT NULL,
+                        to BLOB NOT NULL,
+                        input BLOB NOT NULL,
+                        value VARCHAR NOT NULL,
+                        error BLOB
+                    );
                 "#,
             batch_save_size.get() - 1
         ))?;
@@ -144,6 +159,7 @@ impl BlockSaver {
             let mut block_appender = data_conn.appender("blocks")?;
             let mut transaction_appender = data_conn.appender("transactions")?;
             let mut log_appender = data_conn.appender("logs")?;
+            let mut inner_transaction_appender = data_conn.appender("inner_transactions")?;
             let batch_size = batch_save_size.get();
 
             let append_duration_histogram = histogram!("indexer_duckdb_append_duration_seconds");
@@ -151,7 +167,11 @@ impl BlockSaver {
 
             while let Ok(payload) = rx.recv() {
                 match payload {
-                    BlockSavePayload::NewBlock { block, receipts } => {
+                    BlockSavePayload::NewBlock {
+                        block,
+                        receipts,
+                        traces,
+                    } => {
                         let append_start = Instant::now();
 
                         let block_number = block.number();
@@ -227,6 +247,30 @@ impl BlockSaver {
                             }
                         }
 
+                        for TraceResultsWithTransactionHash {
+                            full_trace,
+                            transaction_hash,
+                        } in traces
+                        {
+                            for trace in full_trace.trace {
+                                if trace.trace_address.is_empty() {
+                                    continue;
+                                }
+                                if let Action::Call(call) = trace.action
+                                    && call.call_type == CallType::Call
+                                {
+                                    inner_transaction_appender.append_row(params![
+                                        transaction_hash.as_slice(),
+                                        call.from.as_slice(),
+                                        call.to.as_slice(),
+                                        call.input.iter().as_slice(),
+                                        call.value.to_string(),
+                                        trace.error
+                                    ])?;
+                                }
+                            }
+                        }
+
                         append_duration_histogram.record(append_start.elapsed().as_secs_f64());
 
                         blocks_in_appender += 1;
@@ -242,6 +286,7 @@ impl BlockSaver {
                             block_appender.flush()?;
                             transaction_appender.flush()?;
                             log_appender.flush()?;
+                            inner_transaction_appender.flush()?;
 
                             flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
                             last_saved_block_counter.absolute(block_number);

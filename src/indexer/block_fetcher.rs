@@ -2,7 +2,8 @@ use std::{num::NonZeroU32, sync::Arc, time::Instant};
 
 use alloy::{
     eips::{BlockId, BlockNumberOrTag},
-    providers::Provider,
+    providers::{Provider, ext::TraceApi},
+    rpc::types::trace::parity::TraceResultsWithTransactionHash,
     transports::{RpcError, TransportErrorKind},
 };
 use flume::Receiver;
@@ -16,9 +17,16 @@ use crate::indexer::{provider::IndexerProvider, types::OpBlock};
 pub type FallibleMaybeBlock = Result<Option<OpBlock>, RpcError<TransportErrorKind>>;
 pub type FallibleMaybeReceipts =
     Result<Option<Vec<OpTransactionReceipt>>, RpcError<TransportErrorKind>>;
+pub type FallibleTraces =
+    Result<Vec<TraceResultsWithTransactionHash>, RpcError<TransportErrorKind>>;
 
 pub struct BlockFetcher {
-    rx: Receiver<(u64, FallibleMaybeBlock, FallibleMaybeReceipts)>,
+    rx: Receiver<(
+        u64,
+        FallibleMaybeBlock,
+        FallibleMaybeReceipts,
+        FallibleTraces,
+    )>,
     pub task_handle: JoinHandle<Result<(), crate::Error>>,
 }
 
@@ -78,13 +86,16 @@ impl BlockFetcher {
                 tokio::spawn(async move {
                     let fetch_start = Instant::now();
                     let block_number = BlockNumberOrTag::Number(fetching_block_number);
-                    let (block, receipts) = tokio::join!(
+                    let (block, receipts, traces) = tokio::join!(
                         provider.get_block_by_number(block_number).full(),
-                        provider.get_block_receipts(BlockId::Number(block_number))
+                        provider.get_block_receipts(BlockId::Number(block_number)),
+                        provider
+                            .trace_replay_block_transactions(BlockId::Number(block_number))
+                            .trace()
                     );
                     block_fetch_duration_histogram.record(fetch_start.elapsed().as_secs_f64());
 
-                    tx.send_async((fetching_block_number, block, receipts))
+                    tx.send_async((fetching_block_number, block, receipts, traces))
                         .await
                         .unwrap();
 
@@ -103,7 +114,14 @@ impl BlockFetcher {
         })
     }
 
-    pub fn receiver(&self) -> &Receiver<(u64, FallibleMaybeBlock, FallibleMaybeReceipts)> {
+    pub fn receiver(
+        &self,
+    ) -> &Receiver<(
+        u64,
+        FallibleMaybeBlock,
+        FallibleMaybeReceipts,
+        FallibleTraces,
+    )> {
         &self.rx
     }
 }
