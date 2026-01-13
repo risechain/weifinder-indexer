@@ -1,5 +1,7 @@
 # Weifinder Indexer
 
+![header.png](./header.png)
+
 A blockchain indexer written in Rust that fetches and stores block data from EVM-compatible chains.
 
 ## Overview
