@@ -140,15 +140,10 @@ impl BlockSaver {
         let (tx, rx) = flume::bounded::<BlockSavePayload>(batch_save_size.get());
 
         let handle = tokio::task::spawn_blocking(move || {
-            let mut block_appender = data_conn.appender("blocks")?;
             let mut blocks_in_appender = 0;
-
+            let mut block_appender = data_conn.appender("blocks")?;
             let mut transaction_appender = data_conn.appender("transactions")?;
-            let mut transactions_in_appender = 0;
-
             let mut log_appender = data_conn.appender("logs")?;
-            let mut logs_in_appender = 0;
-
             let batch_size = batch_save_size.get();
 
             let append_duration_histogram = histogram!("indexer_duckdb_append_duration_seconds");
@@ -177,7 +172,6 @@ impl BlockSaver {
                             block.header.size.as_ref().map(|size| size.to_string())
                         ])?;
 
-                        let receipts_len = receipts.len();
                         let mut block_transactions = block.transactions.into_transactions();
 
                         for receipt in receipts {
@@ -219,8 +213,6 @@ impl BlockSaver {
                                 tx.value().to_string()
                             ])?;
 
-                            let logs_len = receipt.inner.logs().len();
-
                             for log in receipt.inner.logs() {
                                 log_appender.append_row(params![
                                     log.log_index.expect("block to exist"),
@@ -233,14 +225,11 @@ impl BlockSaver {
                                     log.data().data.iter().as_slice()
                                 ])?;
                             }
-
-                            logs_in_appender += logs_len;
                         }
 
                         append_duration_histogram.record(append_start.elapsed().as_secs_f64());
 
                         blocks_in_appender += 1;
-                        transactions_in_appender += receipts_len;
 
                         let at_tip = {
                             let head = provider.current_head().borrow();
@@ -249,47 +238,30 @@ impl BlockSaver {
 
                         if blocks_in_appender >= batch_size || at_tip {
                             let flush_start = Instant::now();
+
                             block_appender.flush()?;
+                            transaction_appender.flush()?;
+                            log_appender.flush()?;
+
                             flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
                             last_saved_block_counter.absolute(block_number);
+
                             if blocks_in_appender >= batch_size {
                                 let txn = data_conn.unchecked_transaction()?;
                                 txn.execute(
                                     "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'blocks')",
                                     [],
                                 )?;
-                                txn.commit()?;
-                                blocks_in_appender = 0;
-                            }
-                        }
-
-                        if transactions_in_appender >= batch_size || at_tip {
-                            let flush_start = Instant::now();
-                            transaction_appender.flush()?;
-                            flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
-                            if transactions_in_appender >= batch_size {
-                                let txn = data_conn.unchecked_transaction()?;
                                 txn.execute(
                                     "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'transactions')",
                                     []
                                 )?;
-                                txn.commit()?;
-                                transactions_in_appender = 0;
-                            }
-                        }
-
-                        if logs_in_appender >= batch_size || at_tip {
-                            let flush_start = Instant::now();
-                            log_appender.flush()?;
-                            flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
-                            if logs_in_appender >= batch_size {
-                                let txn = data_conn.unchecked_transaction()?;
                                 txn.execute(
                                     "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'logs')",
                                     [],
                                 )?;
                                 txn.commit()?;
-                                logs_in_appender = 0;
+                                blocks_in_appender = 0;
                             }
                         }
                     }
