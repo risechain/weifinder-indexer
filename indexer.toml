@@ -1,3 +1,4 @@
-fetcher_max_blocks_per_second = 500
-batch_save_size = 100000
+fetcher_max_blocks_per_second = 200
+batch_save_size = 10000
 s3_endpoint = 'localhost:9000'
+checkpoint_db_path = 'sqlite://./checkpoints.db'

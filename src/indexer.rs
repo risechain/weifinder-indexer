@@ -13,7 +13,10 @@ use tokio::task::JoinHandle;
 
 use std::{collections::VecDeque, num::NonZeroU32};
 
-use alloy::{hex::ToHexExt, rpc::types::trace::parity::TraceResultsWithTransactionHash};
+use alloy::{
+    eips::BlockNumberOrTag, hex::ToHexExt, providers::Provider,
+    rpc::types::trace::parity::TraceResultsWithTransactionHash,
+};
 use metrics::counter;
 
 use crate::{indexer::types::OpBlock, settings::Settings};
@@ -48,12 +51,13 @@ impl ChainIndexer {
             s3_secret_access_key: &settings.s3_secret_access_key,
             s3_bucket: &settings.s3_bucket,
             provider: provider.clone(),
+            checkpoint_db_path: &settings.checkpoint_db_path,
         })?;
 
         let mut last_checkpoint = block_saver.last_saved_checkpoint().await;
 
         let block_fetcher = BlockFetcher::fetch(
-            provider,
+            provider.clone(),
             settings.fetcher_max_blocks_per_second,
             last_checkpoint.as_ref().map(|c| c.block_number + 1),
         )
@@ -106,16 +110,22 @@ impl ChainIndexer {
                     });
 
                 if is_data_store_reorged {
-                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    reorgs_detected_counter.increment(1);
+                    let prev_block = provider
+                        .get_block_by_number(BlockNumberOrTag::Number(incoming_block_number - 1))
+                        .await?
+                        .expect("previous block to exist");
                     saver
                         .send_async(BlockSavePayload::Reorg {
                             new_block_number: incoming_block_number,
-                            prev_checkpoint_tx: tx,
+                            prev_block_hash: prev_block.hash().encode_hex_with_prefix(),
                         })
                         .await
                         .ok();
-                    reorgs_detected_counter.increment(1);
-                    last_checkpoint = Some(rx.await?);
+                    last_checkpoint = Some(Checkpoint {
+                        block_number: incoming_block_number - 1,
+                        block_hash: prev_block.hash().encode_hex_with_prefix(),
+                    });
                 }
 
                 let idx =

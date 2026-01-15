@@ -6,7 +6,11 @@ use alloy::{
     rpc::types::trace::parity::{Action, CallType, TraceResultsWithTransactionHash},
 };
 use chrono::DateTime;
-use duckdb::{OptionalExt, params};
+use diesel::{
+    Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SqliteConnection,
+};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+use duckdb::params;
 use flume::Sender;
 use metrics::{counter, histogram};
 use op_alloy_rpc_types::OpTransactionReceipt;
@@ -23,7 +27,7 @@ pub enum BlockSavePayload {
     },
     Reorg {
         new_block_number: u64,
-        prev_checkpoint_tx: tokio::sync::oneshot::Sender<Checkpoint>,
+        prev_block_hash: String,
     },
 }
 
@@ -40,6 +44,7 @@ pub struct BlockSaverParams<'a> {
     pub s3_access_key_id: &'a str,
     pub s3_secret_access_key: &'a str,
     pub s3_bucket: &'a str,
+    pub checkpoint_db_path: &'a str,
     pub provider: IndexerProvider,
 }
 
@@ -53,7 +58,8 @@ impl BlockSaver {
             s3_secret_access_key,
             s3_bucket,
             provider,
-        }: BlockSaverParams,
+            checkpoint_db_path,
+        }: BlockSaverParams<'_>,
     ) -> Result<Self, crate::Error> {
         let data_conn = duckdb::Connection::open_in_memory()?;
         let is_remote = !s3_endpoint.starts_with("localhost");
@@ -118,8 +124,8 @@ impl BlockSaver {
 
                     CREATE TABLE IF NOT EXISTS inner_transactions (
                         parent_transaction_hash BLOB NOT NULL,
-                        from BLOB NOT NULL,
-                        to BLOB NOT NULL,
+                        from_address BLOB NOT NULL,
+                        to_address BLOB NOT NULL,
                         input BLOB NOT NULL,
                         value VARCHAR NOT NULL,
                         error BLOB
@@ -128,20 +134,23 @@ impl BlockSaver {
             batch_save_size.get() - 1
         ))?;
 
-        let last_checkpoint = data_conn
-            .query_row(
-                "SELECT number, hash FROM blocks ORDER BY number DESC LIMIT 1",
-                [],
-                |row| {
-                    row.get("number").and_then(|number: u64| {
-                        row.get("hash").map(|hash: Vec<u8>| Checkpoint {
-                            block_number: number,
-                            block_hash: hash.encode_hex_with_prefix(),
-                        })
-                    })
-                },
-            )
-            .optional()?;
+        let mut checkpoint_db = SqliteConnection::establish(checkpoint_db_path)?;
+        checkpoint_db
+            .run_pending_migrations(CHECKPOINT_MIGRATIONS)
+            .map_err(|err| crate::Error::CheckpointDatabaseMigrationError { source: err })?;
+
+        let last_checkpoint = {
+            use crate::schema::checkpoints::dsl::*;
+
+            checkpoints
+                .select((block_number, block_hash))
+                .first::<(i32, String)>(&mut checkpoint_db)
+                .optional()?
+                .map(|(number, hash)| Checkpoint {
+                    block_hash: hash,
+                    block_number: number as u64,
+                })
+        };
 
         let last_saved_block_counter = counter!("indexer_last_saved_block");
 
@@ -151,6 +160,8 @@ impl BlockSaver {
                 .map(|c| c.block_number)
                 .unwrap_or(0),
         );
+
+        let chain_id = provider.chain_id();
 
         let (tx, rx) = flume::bounded::<BlockSavePayload>(batch_save_size.get());
 
@@ -288,6 +299,25 @@ impl BlockSaver {
                             log_appender.flush()?;
                             inner_transaction_appender.flush()?;
 
+                            {
+                                use crate::schema::checkpoints::dsl;
+
+                                let block_number_set = dsl::block_number.eq(block_number as i32);
+                                let block_hash_set =
+                                    dsl::block_hash.eq(block_hash.encode_hex_with_prefix());
+
+                                diesel::insert_into(dsl::checkpoints)
+                                    .values((
+                                        dsl::chain_id.eq(chain_id as i32),
+                                        block_number_set,
+                                        block_hash_set.clone(),
+                                    ))
+                                    .on_conflict(dsl::chain_id)
+                                    .do_update()
+                                    .set((block_number_set, block_hash_set))
+                                    .execute(&mut checkpoint_db)?;
+                            }
+
                             flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
                             last_saved_block_counter.absolute(block_number);
 
@@ -312,25 +342,13 @@ impl BlockSaver {
                     }
                     BlockSavePayload::Reorg {
                         new_block_number,
-                        prev_checkpoint_tx,
+                        prev_block_hash,
                     } => {
-                        let last_checkpoint = data_conn.query_row(
-                            "SELECT number, hash FROM blocks WHERE number = $1",
-                            [new_block_number - 1],
-                            |row| {
-                                row.get("number").and_then(|number: u64| {
-                                    row.get("hash").map(|hash: Vec<u8>| Checkpoint {
-                                        block_number: number,
-                                        block_hash: hash.encode_hex_with_prefix(),
-                                    })
-                                })
-                            },
-                        )?;
-                        prev_checkpoint_tx.send(last_checkpoint).ok();
-
                         block_appender.flush()?;
                         transaction_appender.flush()?;
                         log_appender.flush()?;
+                        inner_transaction_appender.flush()?;
+
                         data_conn.execute(
                             r#"
                                 DELETE FROM logs
@@ -339,6 +357,15 @@ impl BlockSaver {
                                 )
                             "#,
                             [new_block_number],
+                        )?;
+                        data_conn.execute(
+                            r#"
+                                DELETE FROM inner_transactions
+                                WHERE parent_transaction_hash IN (
+                                    SELECT hash FROM transactions WHERE block_number >= $1
+                                )
+                            "#,
+                            [],
                         )?;
                         data_conn.execute(
                             r#"
@@ -354,6 +381,25 @@ impl BlockSaver {
                             "#,
                             [new_block_number],
                         )?;
+
+                        {
+                            use crate::schema::checkpoints::dsl;
+
+                            let block_number_set =
+                                dsl::block_number.eq((new_block_number as i32) - 1);
+                            let block_hash_set = dsl::block_hash.eq(prev_block_hash);
+
+                            diesel::insert_into(dsl::checkpoints)
+                                .values((
+                                    dsl::chain_id.eq(chain_id as i32),
+                                    block_number_set,
+                                    block_hash_set.clone(),
+                                ))
+                                .on_conflict(dsl::chain_id)
+                                .do_update()
+                                .set((block_number_set, block_hash_set))
+                                .execute(&mut checkpoint_db)?;
+                        }
                     }
                 }
             }
@@ -372,3 +418,5 @@ impl BlockSaver {
         self.last_checkpoint.read().await.clone()
     }
 }
+
+const CHECKPOINT_MIGRATIONS: EmbeddedMigrations = embed_migrations!();

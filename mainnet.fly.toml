@@ -20,10 +20,14 @@ primary_region = 'nrt'
   processes = ['app']
 
 [[vm]]
-  memory = '2gb'
+  memory = '4gb'
   cpus = 2
-  memory_mb = 2048
+  memory_mb = 4096
 
 [[metrics]]
   port = 9000
   path = '/metrics'
+
+[mounts]
+  source = 'local_data_mainnet'
+  destination = '/data'

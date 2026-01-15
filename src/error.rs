@@ -26,4 +26,13 @@ pub enum Error {
     JoinError(#[from] tokio::task::JoinError),
     #[error("oneshot Recv error")]
     OneshotRecvError(#[from] tokio::sync::oneshot::error::RecvError),
+    #[error("Checkpoint database error: {0}")]
+    CheckpointDatabaseError(#[from] diesel::result::Error),
+    #[error("Checkpoint database connection error: {0}")]
+    CheckpointDatabaseConnectionError(#[from] diesel::result::ConnectionError),
+    #[error("Checkpoint database migration error: {source}")]
+    CheckpointDatabaseMigrationError {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }

@@ -12,4 +12,5 @@ pub struct Settings {
     pub s3_access_key_id: String,
     pub s3_secret_access_key: String,
     pub s3_bucket: String,
+    pub checkpoint_db_path: String,
 }

@@ -9,6 +9,8 @@ anyhow = "1.0.100"
 chrono = "0.4.42"
 clap = { version = "4.5.53", features = ["derive"] }
 config = "0.15.19"
+diesel = { version = "2.3.5", features = ["sqlite"] }
+diesel_migrations = { version = "2.3.1", features = ["sqlite"] }
 duckdb = { version = "1.4.3", features = ["bundled", "chrono"] }
 flume = "0.12.0"
 governor = "0.10.4"

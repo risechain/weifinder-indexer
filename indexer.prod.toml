@@ -1,3 +1,4 @@
 fetcher_max_blocks_per_second = 500
 batch_save_size = 100000
 s3_endpoint = 'fly.storage.tigris.dev'
+checkpoint_db_path = 'sqlite:///data/checkpoints.db'

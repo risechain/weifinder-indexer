@@ -1,5 +1,6 @@
 mod error;
 pub mod indexer;
+pub mod schema;
 mod settings;
 pub mod tui;
 
