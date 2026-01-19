@@ -11,4 +11,6 @@
 - [x] Better error handling
 - [x] Handle storage-level reorg
 - [x] Deploy to fly.io
-- [ ] Fix checkpointing for different tables i.e blocks, transactions and logs all save independently but checkpoint is only take from the blocks table. We need more granular checkpoints for each table
+- [x] Fix checkpointing for different tables i.e blocks, transactions and logs all save independently but checkpoint is only take from the blocks table. We need more granular checkpoints for each table
+- [x] Add block_number to more tables
+- [x] Fix incorrect streaming calculation

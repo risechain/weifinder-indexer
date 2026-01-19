@@ -61,8 +61,9 @@ impl BlockSaver {
             checkpoint_db_path,
         }: BlockSaverParams<'_>,
     ) -> Result<Self, crate::Error> {
-        let data_conn = duckdb::Connection::open_in_memory()?;
+        let mut data_conn = duckdb::Connection::open_in_memory()?;
         let is_remote = !s3_endpoint.starts_with("localhost");
+        let batch_size = batch_save_size.get();
 
         data_conn.execute_batch(&format!(
             r#"
@@ -112,6 +113,7 @@ impl BlockSaver {
                     );
 
                     CREATE TABLE IF NOT EXISTS logs (
+                        block_number UINT64 NOT NULL,
                         index UINT64 NOT NULL,
                         transaction_hash BLOB NOT NULL,
                         address BLOB NOT NULL,
@@ -123,16 +125,22 @@ impl BlockSaver {
                     );
 
                     CREATE TABLE IF NOT EXISTS inner_transactions (
+                        block_number UINT64 NOT NULL,
                         parent_transaction_hash BLOB NOT NULL,
                         from_address BLOB NOT NULL,
                         to_address BLOB NOT NULL,
                         input BLOB NOT NULL,
                         value VARCHAR NOT NULL,
-                        error BLOB
+                        error BLOB,
+                        trace_index VARCHAR NOT NULL
                     );
                 "#,
-            batch_save_size.get() - 1
+            batch_size - 1
         ))?;
+
+        let txn = data_conn.transaction()?;
+        txn.execute("CALL ducklake_flush_inlined_data('weifinder_data')", [])?;
+        txn.commit()?;
 
         let mut checkpoint_db = SqliteConnection::establish(checkpoint_db_path)?;
         checkpoint_db
@@ -161,9 +169,12 @@ impl BlockSaver {
                 .unwrap_or(0),
         );
 
+        let last_checkpoint = Arc::new(RwLock::new(last_checkpoint));
+        let last_checkpoint_clone = last_checkpoint.clone();
+
         let chain_id = provider.chain_id();
 
-        let (tx, rx) = flume::bounded::<BlockSavePayload>(batch_save_size.get());
+        let (tx, rx) = flume::bounded::<BlockSavePayload>(batch_size);
 
         let handle = tokio::task::spawn_blocking(move || {
             let mut blocks_in_appender = 0;
@@ -171,7 +182,6 @@ impl BlockSaver {
             let mut transaction_appender = data_conn.appender("transactions")?;
             let mut log_appender = data_conn.appender("logs")?;
             let mut inner_transaction_appender = data_conn.appender("inner_transactions")?;
-            let batch_size = batch_save_size.get();
 
             let append_duration_histogram = histogram!("indexer_duckdb_append_duration_seconds");
             let flush_duration_histogram = histogram!("indexer_duckdb_flush_duration_seconds");
@@ -219,7 +229,7 @@ impl BlockSaver {
                                 })?;
 
                             transaction_appender.append_row(params![
-                                receipt.inner.block_number.unwrap(),
+                                block_number,
                                 receipt.inner.transaction_index.unwrap(),
                                 receipt.inner.transaction_hash.as_slice(),
                                 receipt.inner.from.as_slice(),
@@ -246,6 +256,7 @@ impl BlockSaver {
 
                             for log in receipt.inner.logs() {
                                 log_appender.append_row(params![
+                                    block_number,
                                     log.log_index.expect("block to exist"),
                                     log.transaction_hash.expect("block to exist").as_slice(),
                                     log.address().as_slice(),
@@ -270,13 +281,21 @@ impl BlockSaver {
                                 if let Action::Call(call) = trace.action
                                     && call.call_type == CallType::Call
                                 {
+                                    let trace_index = trace
+                                        .trace_address
+                                        .iter()
+                                        .map(|i| i.to_string())
+                                        .collect::<Vec<String>>()
+                                        .join(",");
                                     inner_transaction_appender.append_row(params![
+                                        block_number,
                                         transaction_hash.as_slice(),
                                         call.from.as_slice(),
                                         call.to.as_slice(),
                                         call.input.iter().as_slice(),
                                         call.value.to_string(),
-                                        trace.error
+                                        trace.error,
+                                        trace_index
                                     ])?;
                                 }
                             }
@@ -286,12 +305,19 @@ impl BlockSaver {
 
                         blocks_in_appender += 1;
 
-                        let at_tip = {
+                        let streaming = {
+                            let last_checkpoint_number = last_checkpoint_clone
+                                .blocking_read()
+                                .as_ref()
+                                .map(|c| c.block_number);
                             let head = provider.current_head().borrow();
-                            head.hash == block_hash || head.parent_hash == block_hash
+
+                            last_checkpoint_number.is_some_and(|checkpoint_number| {
+                                checkpoint_number + batch_size as u64 > head.number
+                            })
                         };
 
-                        if blocks_in_appender >= batch_size || at_tip {
+                        if blocks_in_appender >= batch_size || streaming {
                             let flush_start = Instant::now();
 
                             block_appender.flush()?;
@@ -321,18 +347,15 @@ impl BlockSaver {
                             flush_duration_histogram.record(flush_start.elapsed().as_secs_f64());
                             last_saved_block_counter.absolute(block_number);
 
+                            *last_checkpoint_clone.blocking_write() = Some(Checkpoint {
+                                block_number,
+                                block_hash: block_hash.encode_hex_with_prefix(),
+                            });
+
                             if blocks_in_appender >= batch_size {
                                 let txn = data_conn.unchecked_transaction()?;
                                 txn.execute(
-                                    "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'blocks')",
-                                    [],
-                                )?;
-                                txn.execute(
-                                    "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'transactions')",
-                                    []
-                                )?;
-                                txn.execute(
-                                    "CALL ducklake_flush_inlined_data('weifinder_data', table_name => 'logs')",
+                                    "CALL ducklake_flush_inlined_data('weifinder_data')",
                                     [],
                                 )?;
                                 txn.commit()?;
@@ -344,6 +367,8 @@ impl BlockSaver {
                         new_block_number,
                         prev_block_hash,
                     } => {
+                        let prev_block_number = new_block_number - 1;
+
                         block_appender.flush()?;
                         transaction_appender.flush()?;
                         log_appender.flush()?;
@@ -352,18 +377,14 @@ impl BlockSaver {
                         data_conn.execute(
                             r#"
                                 DELETE FROM logs
-                                WHERE transaction_hash IN (
-                                    SELECT hash FROM transactions WHERE block_number >= $1
-                                )
+                                WHERE block_number >= $1
                             "#,
                             [new_block_number],
                         )?;
                         data_conn.execute(
                             r#"
                                 DELETE FROM inner_transactions
-                                WHERE parent_transaction_hash IN (
-                                    SELECT hash FROM transactions WHERE block_number >= $1
-                                )
+                                WHERE block_number >= $1
                             "#,
                             [],
                         )?;
@@ -385,9 +406,8 @@ impl BlockSaver {
                         {
                             use crate::schema::checkpoints::dsl;
 
-                            let block_number_set =
-                                dsl::block_number.eq((new_block_number as i32) - 1);
-                            let block_hash_set = dsl::block_hash.eq(prev_block_hash);
+                            let block_number_set = dsl::block_number.eq(prev_block_number as i32);
+                            let block_hash_set = dsl::block_hash.eq(&prev_block_hash);
 
                             diesel::insert_into(dsl::checkpoints)
                                 .values((
@@ -400,6 +420,11 @@ impl BlockSaver {
                                 .set((block_number_set, block_hash_set))
                                 .execute(&mut checkpoint_db)?;
                         }
+
+                        *last_checkpoint_clone.blocking_write() = Some(Checkpoint {
+                            block_number: prev_block_number,
+                            block_hash: prev_block_hash,
+                        });
                     }
                 }
             }
@@ -409,7 +434,7 @@ impl BlockSaver {
 
         Ok(Self {
             tx,
-            last_checkpoint: Arc::new(RwLock::new(last_checkpoint)),
+            last_checkpoint,
             task_handle: handle,
         })
     }
